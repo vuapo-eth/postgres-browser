@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
-import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown } from "lucide-react";
+import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, History } from "lucide-react";
 
 type TableInfo = {
   table_name: string;
@@ -10,6 +10,7 @@ type TableData = {
   columns: string[];
   rows: any[][];
   total_rows: number;
+  query?: string;
 };
 
 export default function Home() {
@@ -27,6 +28,13 @@ export default function Home() {
   const has_auto_connected_ref = useRef(false);
   const [sort_column, set_sort_column] = useState<string | null>(null);
   const [sort_direction, set_sort_direction] = useState<"asc" | "desc">("asc");
+  const [where_conditions, set_where_conditions] = useState<Array<{
+    id: string;
+    column: string;
+    operator: string;
+    value: string;
+    logical_op?: "AND" | "OR";
+  }>>([]);
 
   useEffect(() => {
     const stored = localStorage.getItem("starred_tables");
@@ -74,7 +82,8 @@ export default function Home() {
       const page_num = page_from_url ? parseInt(page_from_url, 10) : current_page;
       const page_to_load = !isNaN(page_num) && page_num > 0 ? page_num : current_page;
       
-      load_table_data(selected_table, page_to_load);
+      const where_clause = where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined;
+      load_table_data(selected_table, page_to_load, sort_column, sort_direction, where_clause);
       if (page_to_load !== current_page) {
         set_current_page(page_to_load);
       }
@@ -130,23 +139,25 @@ export default function Home() {
     set_current_page(1);
     set_sort_column(null);
     set_sort_direction("asc");
+    set_where_conditions([]);
     router.push({ query: { ...router.query, table: table_name, page: "1" } }, undefined, { shallow: true });
     await load_table_data(table_name, 1, null, "asc");
   };
 
   const handle_sort = async (column_name: string, force_direction?: "asc" | "desc") => {
+    const where_clause = where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined;
     if (force_direction) {
       set_sort_column(column_name);
       set_sort_direction(force_direction);
-      await load_table_data(selected_table!, current_page, column_name, force_direction);
+      await load_table_data(selected_table!, current_page, column_name, force_direction, where_clause);
     } else if (sort_column === column_name) {
       const new_direction = sort_direction === "asc" ? "desc" : "asc";
       set_sort_direction(new_direction);
-      await load_table_data(selected_table!, current_page, column_name, new_direction);
+      await load_table_data(selected_table!, current_page, column_name, new_direction, where_clause);
     } else {
       set_sort_column(column_name);
       set_sort_direction("asc");
-      await load_table_data(selected_table!, current_page, column_name, "asc");
+      await load_table_data(selected_table!, current_page, column_name, "asc", where_clause);
     }
   };
 
@@ -163,11 +174,113 @@ export default function Home() {
     router.push("/", undefined, { shallow: true });
   };
 
-  const load_table_data = async (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc") => {
+  const build_where_clause = (conditions: Array<{
+    id: string;
+    column: string;
+    operator: string;
+    value: string;
+    logical_op?: "AND" | "OR";
+  }>): string => {
+    if (conditions.length === 0) return "";
+    
+    return conditions.map((cond: { id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }, idx: number) => {
+      const column_escaped = `"${cond.column.replace(/"/g, '""')}"`;
+      const logical_op = idx > 0 ? ` ${cond.logical_op || "AND"} ` : "";
+      
+      if (cond.operator.includes("NULL")) {
+        return `${logical_op}${column_escaped} ${cond.operator}`;
+      } else if (cond.operator === "IN" || cond.operator === "NOT IN") {
+        const values = cond.value.split(",").map((v: string) => v.trim()).filter((v: string) => v);
+        const values_str = values.map((v: string) => `'${v.replace(/'/g, "''")}'`).join(", ");
+        return `${logical_op}${column_escaped} ${cond.operator} (${values_str})`;
+      } else if (cond.operator === "CONTAINS") {
+        const value_escaped = `'%${cond.value.replace(/'/g, "''")}%'`;
+        return `${logical_op}${column_escaped} LIKE ${value_escaped}`;
+      } else if (cond.operator === "CONTAINS (case-insensitive)") {
+        const value_escaped = `'%${cond.value.replace(/'/g, "''")}%'`;
+        return `${logical_op}${column_escaped} ILIKE ${value_escaped}`;
+      } else {
+        const value_escaped = `'${cond.value.replace(/'/g, "''")}'`;
+        return `${logical_op}${column_escaped} ${cond.operator} ${value_escaped}`;
+      }
+    }).join("");
+  };
+
+  const save_query_to_history = (table_name: string, query: string, where_conditions: Array<{
+    id: string;
+    column: string;
+    operator: string;
+    value: string;
+    logical_op?: "AND" | "OR";
+  }>, sort_column: string | null, sort_direction: "asc" | "desc") => {
+    try {
+      const history_key = `sql_query_history_${table_name}`;
+      const existing_history = localStorage.getItem(history_key);
+      const history: Array<{
+        query: string;
+        where_conditions: Array<{
+          id: string;
+          column: string;
+          operator: string;
+          value: string;
+          logical_op?: "AND" | "OR";
+        }>;
+        sort_column: string | null;
+        sort_direction: "asc" | "desc";
+        timestamp: number;
+      }> = existing_history ? JSON.parse(existing_history) : [];
+
+      const new_entry = {
+        query,
+        where_conditions: JSON.parse(JSON.stringify(where_conditions)),
+        sort_column,
+        sort_direction,
+        timestamp: Date.now(),
+      };
+
+      const filtered_history = history.filter((entry) => entry.query !== query);
+      filtered_history.unshift(new_entry);
+
+      const max_history = 50;
+      const trimmed_history = filtered_history.slice(0, max_history);
+
+      localStorage.setItem(history_key, JSON.stringify(trimmed_history));
+    } catch (err) {
+      console.error("Failed to save query to history:", err);
+    }
+  };
+
+  const get_query_history = (table_name: string): Array<{
+    query: string;
+    where_conditions: Array<{
+      id: string;
+      column: string;
+      operator: string;
+      value: string;
+      logical_op?: "AND" | "OR";
+    }>;
+    sort_column: string | null;
+    sort_direction: "asc" | "desc";
+    timestamp: number;
+  }> => {
+    try {
+      const history_key = `sql_query_history_${table_name}`;
+      const existing_history = localStorage.getItem(history_key);
+      return existing_history ? JSON.parse(existing_history) : [];
+    } catch (err) {
+      return [];
+    }
+  };
+
+  const load_table_data = async (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc", where_clause?: string) => {
     set_is_loading(true);
     set_error(null);
 
     try {
+      const final_sort_col = sort_col !== undefined ? sort_col : sort_column;
+      const final_sort_dir = sort_dir !== undefined ? sort_dir : sort_direction;
+      const final_where_clause = where_clause !== undefined ? where_clause : (where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined);
+
       const response = await fetch("/api/table-data", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -176,8 +289,9 @@ export default function Home() {
           table_name,
           page,
           limit: 20,
-          sort_column: sort_col !== undefined ? sort_col : sort_column,
-          sort_direction: sort_dir !== undefined ? sort_dir : sort_direction,
+          sort_column: final_sort_col,
+          sort_direction: final_sort_dir,
+          where_clause: final_where_clause,
         }),
       });
 
@@ -188,6 +302,10 @@ export default function Home() {
 
       const data = await response.json();
       set_table_data(data);
+
+      if (data.query) {
+        save_query_to_history(table_name, data.query, where_conditions, final_sort_col, final_sort_dir);
+      }
     } catch (err: any) {
       set_error(err.message || "Failed to load table data");
     } finally {
@@ -262,9 +380,18 @@ export default function Home() {
                     sort_column={sort_column}
                     sort_direction={sort_direction}
                     on_sort={handle_sort}
+                    where_conditions={where_conditions}
+                    set_where_conditions={set_where_conditions}
+                    build_where_clause={build_where_clause}
+                    selected_table={selected_table}
+                    load_table_data={load_table_data}
+                    get_query_history={get_query_history}
+                    set_sort_column={set_sort_column}
+                    set_sort_direction={set_sort_direction}
                     on_cell_update={() => {
                       if (selected_table) {
-                        load_table_data(selected_table, current_page, sort_column, sort_direction);
+                        const where_clause = where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined;
+                        load_table_data(selected_table, current_page, sort_column, sort_direction, where_clause);
                       }
                     }}
                   />
@@ -518,6 +645,14 @@ function TableView({
   sort_direction,
   on_sort,
   on_cell_update,
+  where_conditions,
+  set_where_conditions,
+  build_where_clause,
+  selected_table,
+  load_table_data,
+  get_query_history,
+  set_sort_column,
+  set_sort_direction,
 }: {
   table_name: string;
   table_data: TableData;
@@ -530,6 +665,38 @@ function TableView({
   sort_direction: "asc" | "desc";
   on_sort: (column_name: string, force_direction?: "asc" | "desc") => void;
   on_cell_update: () => void;
+  where_conditions: Array<{
+    id: string;
+    column: string;
+    operator: string;
+    value: string;
+    logical_op?: "AND" | "OR";
+  }>;
+  set_where_conditions: React.Dispatch<React.SetStateAction<Array<{
+    id: string;
+    column: string;
+    operator: string;
+    value: string;
+    logical_op?: "AND" | "OR";
+  }>>>;
+  build_where_clause: (conditions: typeof where_conditions) => string;
+  selected_table: string | null;
+  load_table_data: (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc", where_clause?: string) => Promise<void>;
+  get_query_history: (table_name: string) => Array<{
+    query: string;
+    where_conditions: Array<{
+      id: string;
+      column: string;
+      operator: string;
+      value: string;
+      logical_op?: "AND" | "OR";
+    }>;
+    sort_column: string | null;
+    sort_direction: "asc" | "desc";
+    timestamp: number;
+  }>;
+  set_sort_column: React.Dispatch<React.SetStateAction<string | null>>;
+  set_sort_direction: React.Dispatch<React.SetStateAction<"asc" | "desc">>;
 }) {
   const [column_widths, set_column_widths] = useState<Record<number, number>>({});
   const [is_resizing, set_is_resizing] = useState(false);
@@ -548,6 +715,9 @@ function TableView({
   const [drag_over_column, set_drag_over_column] = useState<number | null>(null);
   const [show_images, set_show_images] = useState(false);
   const [search_query, set_search_query] = useState("");
+  const [column_badges_expanded, set_column_badges_expanded] = useState(true);
+  const [query_view_mode, set_query_view_mode] = useState<"sql" | "blocks">("sql");
+  const [is_history_open, set_is_history_open] = useState(false);
 
   const predefined_colors = [
     { name: "Blue", value: "#3B82F6" },
@@ -601,15 +771,21 @@ function TableView({
           set_color_picker_open(null);
         }
       }
+      if (is_history_open) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('[data-history-dropdown]')) {
+          set_is_history_open(false);
+        }
+      }
     };
 
-    if (color_picker_open !== null) {
+    if (color_picker_open !== null || is_history_open) {
       document.addEventListener("mousedown", handle_click_outside);
       return () => {
         document.removeEventListener("mousedown", handle_click_outside);
       };
     }
-  }, [color_picker_open]);
+  }, [color_picker_open, is_history_open]);
 
   const get_column_width = (column_idx: number) => {
     return column_widths_ref.current[column_idx] ?? default_width;
@@ -783,7 +959,72 @@ function TableView({
   };
 
   const get_visible_ordered_columns = () => {
-    return column_order.filter((idx) => column_visibility[idx] !== false);
+    return column_order.filter((idx) => {
+      if (column_visibility[idx] === false) return false;
+      const column_name = table_data.columns[idx];
+      return column_name && column_name.trim() !== "";
+    });
+  };
+
+  const highlight_sql = (sql: string): React.ReactNode[] => {
+    const keywords = /\b(SELECT|FROM|WHERE|ORDER BY|GROUP BY|HAVING|LIMIT|OFFSET|ASC|DESC|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TABLE|INDEX|VIEW|AS|ON|JOIN|INNER|LEFT|RIGHT|FULL|OUTER|UNION|DISTINCT|COUNT|SUM|AVG|MAX|MIN|AND|OR|NOT|IN|LIKE|BETWEEN|IS|NULL|TRUE|FALSE)\b/gi;
+    const strings = /('([^'\\]|\\.)*'|"([^"\\]|\\.)*")/g;
+    const numbers = /\b\d+\b/g;
+    const operators = /([=<>!]+|[\+\-\*\/])/g;
+    
+    const all_matches: Array<{ index: number; length: number; type: 'keyword' | 'string' | 'number' | 'operator'; text: string }> = [];
+    
+    const regexes = [
+      { regex: keywords, type: 'keyword' as const },
+      { regex: strings, type: 'string' as const },
+      { regex: numbers, type: 'number' as const },
+      { regex: operators, type: 'operator' as const },
+    ];
+    
+    regexes.forEach(({ regex, type }) => {
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(sql)) !== null) {
+        all_matches.push({
+          index: match.index,
+          length: match[0].length,
+          type,
+          text: match[0],
+        });
+      }
+    });
+    
+    all_matches.sort((a, b) => a.index - b.index);
+    
+    const result: React.ReactNode[] = [];
+    let current_index = 0;
+    
+    all_matches.forEach((match) => {
+      if (match.index > current_index) {
+        result.push(<span key={`text-${current_index}`}>{sql.substring(current_index, match.index)}</span>);
+      }
+      
+      const color_map = {
+        keyword: 'text-[#3ECF8E]',
+        string: 'text-[#FCD34D]',
+        number: 'text-[#60A5FA]',
+        operator: 'text-[#EC4899]',
+      };
+      
+      result.push(
+        <span key={`${match.type}-${match.index}`} className={color_map[match.type]}>
+          {match.text}
+        </span>
+      );
+      
+      current_index = match.index + match.length;
+    });
+    
+    if (current_index < sql.length) {
+      result.push(<span key={`text-${current_index}`}>{sql.substring(current_index)}</span>);
+    }
+    
+    return result;
   };
 
   const is_uuid = (value: any): boolean => {
@@ -921,12 +1162,60 @@ function TableView({
     return { bg, text, bg_rgba };
   };
 
+  const format_timestamp = (timestamp: number): string => {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diff_ms = now.getTime() - date.getTime();
+    const diff_minutes = Math.floor(diff_ms / 60000);
+    const diff_hours = Math.floor(diff_ms / 3600000);
+    const diff_days = Math.floor(diff_ms / 86400000);
+
+    if (diff_minutes < 1) {
+      return "Just now";
+    } else if (diff_minutes < 60) {
+      return `${diff_minutes}m ago`;
+    } else if (diff_hours < 24) {
+      return `${diff_hours}h ago`;
+    } else if (diff_days < 7) {
+      return `${diff_days}d ago`;
+    } else {
+      return date.toLocaleDateString();
+    }
+  };
+
+  const restore_query_from_history = async (history_entry: {
+    query: string;
+    where_conditions: Array<{
+      id: string;
+      column: string;
+      operator: string;
+      value: string;
+      logical_op?: "AND" | "OR";
+    }>;
+    sort_column: string | null;
+    sort_direction: "asc" | "desc";
+    timestamp: number;
+  }) => {
+    if (!selected_table) return;
+
+    set_sort_column(history_entry.sort_column);
+    set_sort_direction(history_entry.sort_direction);
+    set_where_conditions(JSON.parse(JSON.stringify(history_entry.where_conditions)));
+
+    const where_clause = history_entry.where_conditions.length > 0 ? build_where_clause(history_entry.where_conditions) : undefined;
+    handle_page_change(1);
+    await load_table_data(selected_table, 1, history_entry.sort_column, history_entry.sort_direction, where_clause);
+    set_is_history_open(false);
+  };
+
+  const query_history = get_query_history(table_name);
+
   return (
     <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg p-6 flex flex-col h-full min-h-0">
       <div className="mb-6 flex flex-col gap-4 flex-shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <h2 className="text-lg font-semibold text-white">{table_name}</h2>
+        <h2 className="text-lg font-semibold text-white">{table_name}</h2>
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -936,21 +1225,285 @@ function TableView({
               />
               <span className="text-sm text-[#8b8b8b]">Show images</span>
             </label>
+            <button
+              onClick={() => set_column_badges_expanded(!column_badges_expanded)}
+              className="flex items-center gap-2 px-3 py-1.5 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-sm whitespace-nowrap"
+            >
+              {column_badges_expanded ? (
+                <>
+                  <ChevronUp className="w-4 h-4" />
+                  <span>Hide columns</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-4 h-4" />
+                  <span>Show columns</span>
+                </>
+              )}
+            </button>
           </div>
-          <div className="text-sm text-[#8b8b8b]">
-            {table_data.total_rows} {table_data.total_rows === 1 ? "row" : "rows"}
+        <div className="text-sm text-[#8b8b8b]">
+          {table_data.total_rows} {table_data.total_rows === 1 ? "row" : "rows"}
+        </div>
+        </div>
+        {query_view_mode === "sql" && table_data.query && (
+          <div className="relative">
+            <div className="w-full px-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex-1"></div>
+                <div className="flex items-center gap-2">
+                  <div className="relative" data-history-dropdown>
+                    <button
+                      onClick={() => set_is_history_open(!is_history_open)}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs"
+                    >
+                      <History className="w-3.5 h-3.5" />
+                      <span>History</span>
+                      {query_history.length > 0 && (
+                        <span className="px-1.5 py-0.5 bg-[#3ECF8E] text-black text-xs rounded-full font-semibold">
+                          {query_history.length}
+                        </span>
+                      )}
+                    </button>
+                    {is_history_open && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-40"
+                          onClick={() => set_is_history_open(false)}
+                        />
+                        <div className="absolute right-0 top-full mt-2 w-96 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg shadow-lg z-50 max-h-[400px] overflow-y-auto" data-history-dropdown>
+                          <div className="p-3 border-b border-[#2a2a2a] flex items-center justify-between">
+                            <h3 className="text-sm font-semibold text-white">Query History</h3>
+                            <button
+                              onClick={() => set_is_history_open(false)}
+                              className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
+                            >
+                              <X className="w-4 h-4 text-[#8b8b8b]" />
+                            </button>
+                          </div>
+                          {query_history.length === 0 ? (
+                            <div className="p-4 text-center text-sm text-[#4a4a4a]">
+                              No query history
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-[#2a2a2a]">
+                              {query_history.map((entry, idx) => (
+                                <button
+                                  key={idx}
+                                  onClick={() => restore_query_from_history(entry)}
+                                  className="w-full p-3 text-left hover:bg-[#1f1f1f] transition-colors group"
+                                >
+                                  <div className="flex items-start justify-between gap-2 mb-1">
+                                    <div className="flex-1 min-w-0">
+                                      <div className="font-mono text-xs text-white truncate mb-1">
+                                        {entry.query.length > 80 ? `${entry.query.substring(0, 80)}...` : entry.query}
+                                      </div>
+                                      <div className="flex items-center gap-2 text-xs text-[#4a4a4a]">
+                                        {entry.sort_column && (
+                                          <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
+                                            Sort: {entry.sort_column} {entry.sort_direction}
+                                          </span>
+                                        )}
+                                        {entry.where_conditions && entry.where_conditions.length > 0 && (
+                                          <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
+                                            {entry.where_conditions.length} filter{entry.where_conditions.length !== 1 ? "s" : ""}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="text-xs text-[#4a4a4a] whitespace-nowrap">
+                                      {format_timestamp(entry.timestamp)}
+                                    </div>
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => set_query_view_mode("sql")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                      query_view_mode === "sql"
+                        ? "bg-[#3ECF8E] text-black"
+                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                    }`}
+                  >
+                    <Code className="w-3.5 h-3.5" />
+                    SQL
+                  </button>
+                  <button
+                    onClick={() => set_query_view_mode("blocks")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                      (query_view_mode as "sql" | "blocks") === "blocks"
+                        ? "bg-[#3ECF8E] text-black"
+                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                    }`}
+                  >
+                    <Blocks className="w-3.5 h-3.5" />
+                    Blocks
+                  </button>
+                </div>
+              </div>
+              <div className="font-mono text-xs overflow-x-auto">
+                <pre className="text-white whitespace-pre-wrap break-words">
+                  {highlight_sql(table_data.query)}
+                </pre>
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#4a4a4a]" />
-          <input
-            type="text"
-            value={search_query}
-            onChange={(e) => set_search_query(e.target.value)}
-            placeholder="Search column names..."
-            className="w-full pl-10 pr-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-sm"
-          />
-        </div>
+        )}
+        {query_view_mode === "blocks" && (
+          <div className="relative">
+            <div className="w-full px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs text-[#8b8b8b]">WHERE</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => set_query_view_mode("sql")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                      (query_view_mode as "sql" | "blocks") === "sql"
+                        ? "bg-[#3ECF8E] text-black"
+                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                    }`}
+                  >
+                    <Code className="w-3.5 h-3.5" />
+                    SQL
+                  </button>
+                  <button
+                    onClick={() => set_query_view_mode("blocks")}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
+                      query_view_mode === "blocks"
+                        ? "bg-[#3ECF8E] text-black"
+                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                    }`}
+                  >
+                    <Blocks className="w-3.5 h-3.5" />
+                    Blocks
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col gap-2">
+                {where_conditions.length === 0 ? (
+                  <div className="text-xs text-[#4a4a4a] italic py-2">No conditions added</div>
+                ) : (
+                  where_conditions.map((condition, idx) => (
+                    <div key={condition.id} className="flex items-center gap-2 flex-wrap">
+                      {idx > 0 && (
+                        <select
+                          value={condition.logical_op || "AND"}
+                          onChange={(e) => {
+                            const new_conditions = [...where_conditions];
+                            new_conditions[idx].logical_op = e.target.value as "AND" | "OR";
+                            set_where_conditions(new_conditions);
+                          }}
+                          className="px-2 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs"
+                        >
+                          <option value="AND">AND</option>
+                          <option value="OR">OR</option>
+                        </select>
+                      )}
+                      <select
+                        value={condition.column}
+                        onChange={(e) => {
+                          const new_conditions = [...where_conditions];
+                          new_conditions[idx].column = e.target.value;
+                          set_where_conditions(new_conditions);
+                        }}
+                        className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs"
+                      >
+                        {table_data.columns.filter(col => col && col.trim() !== "").map((col) => (
+                          <option key={col} value={col}>{col}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={condition.operator}
+                        onChange={(e) => {
+                          const new_conditions = [...where_conditions];
+                          new_conditions[idx].operator = e.target.value;
+                          set_where_conditions(new_conditions);
+                        }}
+                        className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs"
+                      >
+                        <option value="=">=</option>
+                        <option value="!=">!=</option>
+                        <option value=">">&gt;</option>
+                        <option value="<">&lt;</option>
+                        <option value=">=">&gt;=</option>
+                        <option value="<=">&lt;=</option>
+                        <option value="CONTAINS">Contains</option>
+                        <option value="CONTAINS (case-insensitive)">Contains (case-insensitive)</option>
+                        <option value="LIKE">LIKE</option>
+                        <option value="ILIKE">ILIKE</option>
+                        <option value="IN">IN</option>
+                        <option value="NOT IN">NOT IN</option>
+                        <option value="IS NULL">IS NULL</option>
+                        <option value="IS NOT NULL">IS NOT NULL</option>
+                      </select>
+                      {!condition.operator.includes("NULL") && (
+                        <input
+                          type="text"
+                          value={condition.value}
+                          onChange={(e) => {
+                            const new_conditions = [...where_conditions];
+                            new_conditions[idx].value = e.target.value;
+                            set_where_conditions(new_conditions);
+                          }}
+                          placeholder="Value"
+                          className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs flex-1 min-w-[120px]"
+                        />
+                      )}
+                      <button
+                        onClick={() => {
+                          set_where_conditions(where_conditions.filter((_, i) => i !== idx));
+                        }}
+                        className="p-1.5 hover:bg-[#1f1f1f] rounded transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5 text-[#8b8b8b] hover:text-[#EF4444]" />
+                      </button>
+                    </div>
+                  ))
+                )}
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      set_where_conditions([
+                        ...where_conditions,
+                        {
+                          id: Date.now().toString(),
+                          column: table_data.columns.find(col => col && col.trim() !== "") || "",
+                          operator: "=",
+                          value: "",
+                          logical_op: where_conditions.length > 0 ? "AND" : undefined,
+                        },
+                      ]);
+                    }}
+                    className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50 transition-all flex items-center gap-1.5 w-fit"
+                  >
+                    <span>+</span>
+                    <span>Add Condition</span>
+                  </button>
+                  {where_conditions.length > 0 && (
+                    <button
+                      onClick={async () => {
+                        if (selected_table) {
+                          const where_clause = build_where_clause(where_conditions);
+                          handle_page_change(1);
+                          await load_table_data(selected_table, 1, sort_column, sort_direction, where_clause);
+                        }
+                      }}
+                      className="px-4 py-2 bg-[#3ECF8E] hover:bg-[#24B47E] text-black font-semibold rounded-lg transition-all text-xs w-fit"
+                    >
+                      Apply Filters
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       
       {is_loading ? (
@@ -960,8 +1513,23 @@ function TableView({
         </div>
       ) : (
         <>
-          <div className="mb-4 flex flex-wrap gap-2 flex-shrink-0">
-            {column_order.map((column_idx) => {
+          {column_badges_expanded && (
+            <div className="mb-4 flex flex-col gap-3 flex-shrink-0">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#4a4a4a]" />
+                <input
+                  type="text"
+                  value={search_query}
+                  onChange={(e) => set_search_query(e.target.value)}
+                  placeholder="Search column names..."
+                  className="w-full pl-10 pr-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-sm"
+                />
+              </div>
+              <div className="flex flex-wrap gap-2">
+              {column_order.filter((idx) => {
+                const col_name = table_data.columns[idx];
+                return col_name && col_name.trim() !== "";
+              }).map((column_idx) => {
               const column_name = table_data.columns[column_idx];
               const is_visible = column_visibility[column_idx] !== false;
               const is_dragged = dragged_column === column_idx;
@@ -1068,8 +1636,10 @@ function TableView({
                   </div>
                 </div>
               );
-            })}
-          </div>
+              })}
+              </div>
+            </div>
+          )}
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             <div className="flex-1 overflow-auto mb-6 rounded-lg border border-[#2a2a2a]">
               <table
@@ -1243,6 +1813,13 @@ function TableView({
                                           />
                                           <span className="truncate block text-xs text-[#8b8b8b] hidden">{cell_text}</span>
                                         </div>
+                                      );
+                                    } else if (!show_images && is_image_url(cell)) {
+                                      return (
+                                        <span className="truncate block">
+                                          <span className="mr-1">🖼️</span>
+                                          {cell_text}
+                                        </span>
                                       );
                                     } else {
                                       return <span className="truncate block">{cell_text}</span>;

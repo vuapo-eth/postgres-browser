@@ -5,6 +5,7 @@ type ResponseData = {
   columns: string[];
   rows: any[][];
   total_rows: number;
+  query: string;
 } | {
   error: string;
 };
@@ -17,7 +18,7 @@ export default async function handler(
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { postgres_url, table_name, page = 1, limit = 20, sort_column, sort_direction = "asc" } = req.body;
+  const { postgres_url, table_name, page = 1, limit = 20, sort_column, sort_direction = "asc", where_clause } = req.body;
 
   if (!postgres_url || !table_name) {
     return res
@@ -44,6 +45,10 @@ export default async function handler(
     let query = `SELECT * FROM ${table_name_escaped}`;
     const query_params: any[] = [];
     
+    if (where_clause && where_clause.trim() !== "") {
+      query += ` WHERE ${where_clause}`;
+    }
+    
     if (sort_column) {
       const column_escaped = `"${sort_column.replace(/"/g, '""')}"`;
       const direction = sort_direction === "desc" ? "DESC" : "ASC";
@@ -60,12 +65,25 @@ export default async function handler(
       columns.map((col) => row[col])
     );
 
+    const final_query = query.replace(/\$\d+/g, (match, offset) => {
+      const param_index = parseInt(match.substring(1)) - 1;
+      if (param_index < query_params.length) {
+        const param = query_params[param_index];
+        if (typeof param === 'string') {
+          return `'${param.replace(/'/g, "''")}'`;
+        }
+        return String(param);
+      }
+      return match;
+    });
+
     await client.end();
 
     return res.status(200).json({
       columns,
       rows,
       total_rows,
+      query: final_query,
     });
   } catch (error: any) {
     if (client) {
