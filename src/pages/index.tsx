@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle } from "lucide-react";
+import { useRouter } from "next/router";
+import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown } from "lucide-react";
 
 type TableInfo = {
   table_name: string;
@@ -12,6 +13,7 @@ type TableData = {
 };
 
 export default function Home() {
+  const router = useRouter();
   const [postgres_url, set_postgres_url] = useState("");
   const [is_connected, set_is_connected] = useState(false);
   const [tables, set_tables] = useState<TableInfo[]>([]);
@@ -21,6 +23,10 @@ export default function Home() {
   const [is_loading, set_is_loading] = useState(false);
   const [error, set_error] = useState<string | null>(null);
   const [starred_tables, set_starred_tables] = useState<Set<string>>(new Set());
+  const [is_initialized, set_is_initialized] = useState(false);
+  const has_auto_connected_ref = useRef(false);
+  const [sort_column, set_sort_column] = useState<string | null>(null);
+  const [sort_direction, set_sort_direction] = useState<"asc" | "desc">("asc");
 
   useEffect(() => {
     const stored = localStorage.getItem("starred_tables");
@@ -32,6 +38,48 @@ export default function Home() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    const stored_url = localStorage.getItem("postgres_url");
+    if (stored_url) {
+      set_postgres_url(stored_url);
+    }
+
+    const table_from_url = router.query.table as string;
+    if (table_from_url) {
+      set_selected_table(table_from_url);
+    }
+
+    const page_from_url = router.query.page as string;
+    if (page_from_url) {
+      const page_num = parseInt(page_from_url, 10);
+      if (!isNaN(page_num) && page_num > 0) {
+        set_current_page(page_num);
+      }
+    }
+
+    set_is_initialized(true);
+  }, [router.query.table, router.query.page]);
+
+  useEffect(() => {
+    if (is_initialized && postgres_url && !is_connected && !has_auto_connected_ref.current) {
+      has_auto_connected_ref.current = true;
+      handle_connect();
+    }
+  }, [is_initialized, postgres_url, is_connected]);
+
+  useEffect(() => {
+    if (is_connected && selected_table) {
+      const page_from_url = router.query.page as string;
+      const page_num = page_from_url ? parseInt(page_from_url, 10) : current_page;
+      const page_to_load = !isNaN(page_num) && page_num > 0 ? page_num : current_page;
+      
+      load_table_data(selected_table, page_to_load);
+      if (page_to_load !== current_page) {
+        set_current_page(page_to_load);
+      }
+    }
+  }, [is_connected, selected_table, router.query.page]);
 
   const toggle_star = (table_name: string) => {
     const new_starred = new Set(starred_tables);
@@ -68,6 +116,7 @@ export default function Home() {
       const data = await response.json();
       set_tables(data.tables);
       set_is_connected(true);
+      localStorage.setItem("postgres_url", postgres_url);
     } catch (err: any) {
       set_error(err.message || "Failed to connect to database");
       set_is_connected(false);
@@ -79,10 +128,42 @@ export default function Home() {
   const handle_table_click = async (table_name: string) => {
     set_selected_table(table_name);
     set_current_page(1);
-    await load_table_data(table_name, 1);
+    set_sort_column(null);
+    set_sort_direction("asc");
+    router.push({ query: { ...router.query, table: table_name, page: "1" } }, undefined, { shallow: true });
+    await load_table_data(table_name, 1, null, "asc");
   };
 
-  const load_table_data = async (table_name: string, page: number) => {
+  const handle_sort = async (column_name: string, force_direction?: "asc" | "desc") => {
+    if (force_direction) {
+      set_sort_column(column_name);
+      set_sort_direction(force_direction);
+      await load_table_data(selected_table!, current_page, column_name, force_direction);
+    } else if (sort_column === column_name) {
+      const new_direction = sort_direction === "asc" ? "desc" : "asc";
+      set_sort_direction(new_direction);
+      await load_table_data(selected_table!, current_page, column_name, new_direction);
+    } else {
+      set_sort_column(column_name);
+      set_sort_direction("asc");
+      await load_table_data(selected_table!, current_page, column_name, "asc");
+    }
+  };
+
+  const handle_log_out = () => {
+    localStorage.removeItem("postgres_url");
+    set_postgres_url("");
+    set_is_connected(false);
+    set_tables([]);
+    set_selected_table(null);
+    set_table_data(null);
+    set_current_page(1);
+    set_error(null);
+    has_auto_connected_ref.current = false;
+    router.push("/", undefined, { shallow: true });
+  };
+
+  const load_table_data = async (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc") => {
     set_is_loading(true);
     set_error(null);
 
@@ -95,6 +176,8 @@ export default function Home() {
           table_name,
           page,
           limit: 20,
+          sort_column: sort_col !== undefined ? sort_col : sort_column,
+          sort_direction: sort_dir !== undefined ? sort_dir : sort_direction,
         }),
       });
 
@@ -115,7 +198,8 @@ export default function Home() {
   const handle_page_change = (new_page: number) => {
     if (selected_table) {
       set_current_page(new_page);
-      load_table_data(selected_table, new_page);
+      router.push({ query: { ...router.query, page: new_page.toString() } }, undefined, { shallow: true });
+      load_table_data(selected_table, new_page, sort_column, sort_direction);
     }
   };
 
@@ -145,6 +229,14 @@ export default function Home() {
                   {tables.length} {tables.length === 1 ? "table" : "tables"} available
                 </p>
               </div>
+              <button
+                onClick={handle_log_out}
+                className="flex items-center gap-2 px-4 py-2 bg-[#1f1f1f] border border-[#2a2a2a] rounded-lg text-white hover:bg-[#2a2a2a] hover:border-[#EF4444]/50 transition-all"
+                title="Log out and clear connection"
+              >
+                <Lock className="w-4 h-4" />
+                <span className="text-sm">Log Out</span>
+              </button>
             </div>
 
             <div className="flex-1 grid grid-cols-1 lg:grid-cols-5 gap-3 min-h-0">
@@ -167,9 +259,12 @@ export default function Home() {
                     handle_page_change={handle_page_change}
                     is_loading={is_loading}
                     postgres_url={postgres_url}
+                    sort_column={sort_column}
+                    sort_direction={sort_direction}
+                    on_sort={handle_sort}
                     on_cell_update={() => {
                       if (selected_table) {
-                        load_table_data(selected_table, current_page);
+                        load_table_data(selected_table, current_page, sort_column, sort_direction);
                       }
                     }}
                   />
@@ -419,6 +514,9 @@ function TableView({
   handle_page_change,
   is_loading,
   postgres_url,
+  sort_column,
+  sort_direction,
+  on_sort,
   on_cell_update,
 }: {
   table_name: string;
@@ -428,6 +526,9 @@ function TableView({
   handle_page_change: (page: number) => void;
   is_loading: boolean;
   postgres_url: string;
+  sort_column: string | null;
+  sort_direction: "asc" | "desc";
+  on_sort: (column_name: string, force_direction?: "asc" | "desc") => void;
   on_cell_update: () => void;
 }) {
   const [column_widths, set_column_widths] = useState<Record<number, number>>({});
@@ -445,6 +546,8 @@ function TableView({
   const [color_picker_open, set_color_picker_open] = useState<number | null>(null);
   const [dragged_column, set_dragged_column] = useState<number | null>(null);
   const [drag_over_column, set_drag_over_column] = useState<number | null>(null);
+  const [show_images, set_show_images] = useState(false);
+  const [search_query, set_search_query] = useState("");
 
   const predefined_colors = [
     { name: "Blue", value: "#3B82F6" },
@@ -683,12 +786,170 @@ function TableView({
     return column_order.filter((idx) => column_visibility[idx] !== false);
   };
 
+  const is_uuid = (value: any): boolean => {
+    if (value === null || value === undefined) return false;
+    const str = String(value).trim();
+    const uuid_regex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return uuid_regex.test(str);
+  };
+
+  const parse_uuids = (value: any): string[] | null => {
+    if (value === null || value === undefined) return null;
+    const str = String(value).trim();
+    const parts = str.split(',').map(p => p.trim()).filter(p => p.length > 0);
+    const uuid_regex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const all_are_uuids = parts.length > 0 && parts.every(p => uuid_regex.test(p));
+    return all_are_uuids ? parts : null;
+  };
+
+  const is_datetime = (value: any): boolean => {
+    if (value === null || value === undefined) return false;
+    const str = String(value).trim();
+    const datetime_regex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z?$/;
+    return datetime_regex.test(str);
+  };
+
+  const is_image_url = (value: any): boolean => {
+    if (value === null || value === undefined) return false;
+    const str = String(value).trim();
+    try {
+      const url = new URL(str);
+      const pathname = url.pathname.toLowerCase();
+      const image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.ico'];
+      return image_extensions.some(ext => pathname.endsWith(ext)) || 
+             url.hostname.includes('cloudinary.com') ||
+             url.hostname.includes('imgur.com') ||
+             url.hostname.includes('unsplash.com');
+    } catch {
+      return false;
+    }
+  };
+
+  const optimize_cloudinary_url = (url_str: string): string => {
+    try {
+      const url = new URL(url_str);
+      if (url.hostname.includes('cloudinary.com')) {
+        const path_parts = url.pathname.split('/');
+        const upload_index = path_parts.findIndex(part => part === 'upload');
+        if (upload_index !== -1 && upload_index < path_parts.length - 1) {
+          const existing_transform = path_parts[upload_index + 1];
+          if (existing_transform && existing_transform.match(/^[a-z0-9_,]+$/)) {
+            path_parts[upload_index + 1] = 'w_400,q_auto,f_auto';
+          } else {
+            path_parts.splice(upload_index + 1, 0, 'w_400,q_auto,f_auto');
+          }
+          url.pathname = path_parts.join('/');
+        } else if (upload_index !== -1) {
+          path_parts.splice(upload_index + 1, 0, 'w_400,q_auto,f_auto');
+          url.pathname = path_parts.join('/');
+        }
+        return url.toString();
+      }
+    } catch {
+    }
+    return url_str;
+  };
+
+  const format_from_now = (datetime_str: string): string => {
+    try {
+      const date = new Date(datetime_str);
+      const now = new Date();
+      const diff_ms = now.getTime() - date.getTime();
+      const diff_seconds = Math.floor(diff_ms / 1000);
+      const diff_minutes = Math.floor(diff_seconds / 60);
+      const diff_hours = Math.floor(diff_minutes / 60);
+      const diff_days = Math.floor(diff_hours / 24);
+      const diff_weeks = Math.floor(diff_days / 7);
+      const diff_months = Math.floor(diff_days / 30);
+      const diff_years = Math.floor(diff_days / 365);
+
+      if (diff_seconds < 60) {
+        return diff_seconds <= 0 ? "just now" : `${diff_seconds} second${diff_seconds === 1 ? "" : "s"} ago`;
+      } else if (diff_minutes < 60) {
+        return `${diff_minutes} minute${diff_minutes === 1 ? "" : "s"} ago`;
+      } else if (diff_hours < 24) {
+        return `${diff_hours} hour${diff_hours === 1 ? "" : "s"} ago`;
+      } else if (diff_days < 7) {
+        return `${diff_days} day${diff_days === 1 ? "" : "s"} ago`;
+      } else if (diff_weeks < 4) {
+        return `${diff_weeks} week${diff_weeks === 1 ? "" : "s"} ago`;
+      } else if (diff_months < 12) {
+        return `${diff_months} month${diff_months === 1 ? "" : "s"} ago`;
+      } else {
+        return `${diff_years} year${diff_years === 1 ? "" : "s"} ago`;
+      }
+    } catch (e) {
+      return "";
+    }
+  };
+
+  const hsl_to_rgb = (h: number, s: number, l: number): [number, number, number] => {
+    s /= 100;
+    l /= 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    const m = l - c / 2;
+    let r = 0, g = 0, b = 0;
+    if (h >= 0 && h < 60) {
+      r = c; g = x; b = 0;
+    } else if (h >= 60 && h < 120) {
+      r = x; g = c; b = 0;
+    } else if (h >= 120 && h < 180) {
+      r = 0; g = c; b = x;
+    } else if (h >= 180 && h < 240) {
+      r = 0; g = x; b = c;
+    } else if (h >= 240 && h < 300) {
+      r = x; g = 0; b = c;
+    } else if (h >= 300 && h < 360) {
+      r = c; g = 0; b = x;
+    }
+    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+  };
+
+  const get_uuid_color = (uuid: string): { bg: string; text: string; bg_rgba: string } => {
+    let hash = 0;
+    for (let i = 0; i < uuid.length; i++) {
+      hash = uuid.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const hue = Math.abs(hash) % 360;
+    const saturation = 50 + (Math.abs(hash) % 30);
+    const lightness = 40 + (Math.abs(hash) % 20);
+    const bg = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+    const text = `hsl(${hue}, ${saturation}%, ${Math.min(lightness + 25, 85)}%)`;
+    const [r, g, b] = hsl_to_rgb(hue, saturation, lightness);
+    const bg_rgba = `rgba(${r}, ${g}, ${b}, 0.2)`;
+    return { bg, text, bg_rgba };
+  };
+
   return (
     <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg p-6 flex flex-col h-full min-h-0">
-      <div className="mb-6 flex items-center justify-between flex-shrink-0">
-        <h2 className="text-lg font-semibold text-white">{table_name}</h2>
-        <div className="text-sm text-[#8b8b8b]">
-          {table_data.total_rows} {table_data.total_rows === 1 ? "row" : "rows"}
+      <div className="mb-6 flex flex-col gap-4 flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <h2 className="text-lg font-semibold text-white">{table_name}</h2>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={show_images}
+                onChange={(e) => set_show_images(e.target.checked)}
+                className="w-4 h-4 rounded border-[#2a2a2a] bg-[#0f0f0f] text-[#3ECF8E] focus:ring-2 focus:ring-[#3ECF8E] focus:ring-offset-0"
+              />
+              <span className="text-sm text-[#8b8b8b]">Show images</span>
+            </label>
+          </div>
+          <div className="text-sm text-[#8b8b8b]">
+            {table_data.total_rows} {table_data.total_rows === 1 ? "row" : "rows"}
+          </div>
+        </div>
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#4a4a4a]" />
+          <input
+            type="text"
+            value={search_query}
+            onChange={(e) => set_search_query(e.target.value)}
+            placeholder="Search column names..."
+            className="w-full pl-10 pr-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-sm"
+          />
         </div>
       </div>
       
@@ -705,6 +966,7 @@ function TableView({
               const is_visible = column_visibility[column_idx] !== false;
               const is_dragged = dragged_column === column_idx;
               const is_drag_over = drag_over_column === column_idx;
+              const matches_search = search_query.trim() === "" || column_name.toLowerCase().includes(search_query.toLowerCase());
 
               return (
                 <div
@@ -719,6 +981,8 @@ function TableView({
                       ? "opacity-50 bg-[#1f1f1f] border-[#3ECF8E]"
                       : is_drag_over
                       ? "bg-[#1f1f1f] border-[#3ECF8E] scale-105"
+                      : matches_search && search_query.trim() !== ""
+                      ? "bg-[#3ECF8E]/20 border-[#3ECF8E]/50 hover:border-[#3ECF8E]"
                       : is_visible
                       ? "bg-[#0f0f0f] border-[#2a2a2a] hover:border-[#3ECF8E]/50"
                       : "bg-[#0f0f0f] border-[#2a2a2a] opacity-50"
@@ -730,7 +994,7 @@ function TableView({
                       is_visible ? "text-white" : "text-[#4a4a4a] line-through"
                     }`}
                   >
-                    {column_name}
+                    {column_name || `Column ${column_idx + 1}`}
                   </span>
                     <div className="flex items-center gap-1">
                       <div className="relative" data-color-picker>
@@ -831,7 +1095,35 @@ function TableView({
                           backgroundColor: get_column_color_with_opacity(column_idx) || undefined,
                         }}
                       >
-                        <div className="truncate pr-4">{column}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="truncate flex-1">{column || `Column ${column_idx + 1}`}</div>
+                          <div className="flex flex-col flex-shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                on_sort(column, "asc");
+                              }}
+                              className={`p-0.5 hover:bg-[#1f1f1f] rounded transition-colors ${
+                                sort_column === column && sort_direction === "asc" ? "text-[#3ECF8E]" : "text-[#4a4a4a]"
+                              }`}
+                              title="Sort ascending"
+                            >
+                              <ArrowUp className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                on_sort(column, "desc");
+                              }}
+                              className={`p-0.5 hover:bg-[#1f1f1f] rounded transition-colors ${
+                                sort_column === column && sort_direction === "desc" ? "text-[#3ECF8E]" : "text-[#4a4a4a]"
+                              }`}
+                              title="Sort descending"
+                            >
+                              <ArrowDown className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
                         <div
                           className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-[#3ECF8E]/50 transition-colors"
                           onMouseDown={(e) => handle_mouse_down(column_idx, e)}
@@ -859,7 +1151,7 @@ function TableView({
                         return (
                           <td
                             key={`${row_idx}-${column_idx}`}
-                            className={`px-6 py-4 text-sm text-white relative group ${
+                            className={`px-6 py-4 text-sm text-white relative group cursor-pointer ${
                               display_idx < visible_columns.length - 1 ? "border-r border-[#2a2a2a]" : ""
                             }`}
                             style={{
@@ -870,27 +1162,100 @@ function TableView({
                             }}
                             onMouseEnter={() => set_hovered_cell({ row_idx, cell_idx: display_idx })}
                             onMouseLeave={() => set_hovered_cell(null)}
+                            onClick={() => {
+                              if (!is_editing) {
+                                handle_edit(cell, row_idx, display_idx);
+                              }
+                            }}
                           >
-                            <div className="truncate pr-16">
+                            <div className="min-w-0 w-full">
                               {cell === null || cell === undefined
                                 ? (
                                     <span className="text-[#4a4a4a] italic">null</span>
                                   )
-                                : (
-                                    cell_text
-                                  )}
+                                : (() => {
+                                    const uuid_list = parse_uuids(cell);
+                                    if (uuid_list) {
+                                      return (
+                                        <div className="flex flex-col gap-1 min-w-0">
+                                          {uuid_list.map((uuid, idx) => {
+                                            const colors = get_uuid_color(uuid);
+                                            return (
+                                              <span 
+                                                key={idx}
+                                                className="block px-2 py-1 rounded border font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis w-full"
+                                                style={{ 
+                                                  backgroundColor: colors.bg_rgba,
+                                                  color: colors.text,
+                                                  borderColor: colors.text
+                                                }}
+                                              >
+                                                {uuid}
+                                              </span>
+                                            );
+                                          })}
+                                        </div>
+                                      );
+                                    } else if (is_uuid(cell)) {
+                                      const colors = get_uuid_color(cell_text);
+                                      return (
+                                        <span 
+                                          className="block px-2 py-1 rounded border font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis w-full"
+                                          style={{ 
+                                            backgroundColor: colors.bg_rgba,
+                                            color: colors.text,
+                                            borderColor: colors.text
+                                          }}
+                                        >
+                                          {cell_text}
+                                        </span>
+                                      );
+                                    } else if (is_datetime(cell)) {
+                                      const from_now = format_from_now(cell_text);
+                                      return (
+                                        <span 
+                                          className="inline-flex items-center px-2.5 py-0.5 rounded-full font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis bg-[#F59E0B]/15 text-[#FCD34D] relative group/datetime"
+                                          title={from_now}
+                                        >
+                                          {cell_text}
+                                          {from_now && (
+                                            <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-2 py-1 bg-[#1f1f1f] border border-[#2a2a2a] rounded text-xs text-white whitespace-nowrap opacity-0 group-hover/datetime:opacity-100 transition-opacity pointer-events-none z-20">
+                                              {from_now}
+                                              <div className="absolute top-full left-1/2 transform -translate-x-1/2 -mt-1 w-2 h-2 bg-[#1f1f1f] border-r border-b border-[#2a2a2a] rotate-45"></div>
+                                            </div>
+                                          )}
+                                        </span>
+                                      );
+                                    } else if (show_images && is_image_url(cell)) {
+                                      const optimized_url = optimize_cloudinary_url(cell_text);
+                                      return (
+                                        <div className="flex items-center gap-2">
+                                          <img
+                                            src={optimized_url}
+                                            alt=""
+                                            className="max-w-[100px] max-h-[100px] object-contain rounded border border-[#2a2a2a]"
+                                            onError={(e) => {
+                                              const target = e.target as HTMLImageElement;
+                                              target.style.display = 'none';
+                                              const fallback = target.nextElementSibling as HTMLElement;
+                                              if (fallback) fallback.style.display = 'block';
+                                            }}
+                                          />
+                                          <span className="truncate block text-xs text-[#8b8b8b] hidden">{cell_text}</span>
+                                        </div>
+                                      );
+                                    } else {
+                                      return <span className="truncate block">{cell_text}</span>;
+                                    }
+                                  })()}
                             </div>
                             {is_hovered && (
-                              <div className="absolute right-2 top-1/2 transform -translate-y-1/2 flex items-center gap-1 z-10">
+                              <div className="absolute right-2 top-1/2 transform -translate-y-1/2 flex items-center gap-1 z-10 pointer-events-auto bg-[#1a1a1a] pl-2">
                                 <button
-                                  onClick={() => handle_edit(cell, row_idx, display_idx)}
-                                  className="p-1.5 bg-[#1f1f1f] border border-[#2a2a2a] rounded hover:bg-[#2a2a2a] hover:border-[#3ECF8E]/50 transition-all"
-                                  title="Edit cell"
-                                >
-                                  <Edit className="w-3.5 h-3.5 text-[#8b8b8b] hover:text-[#3ECF8E]" />
-                                </button>
-                                <button
-                                  onClick={() => handle_copy(cell, row_idx, display_idx)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handle_copy(cell, row_idx, display_idx);
+                                  }}
                                   className="p-1.5 bg-[#1f1f1f] border border-[#2a2a2a] rounded hover:bg-[#2a2a2a] hover:border-[#3ECF8E]/50 transition-all"
                                   title="Copy to clipboard"
                                 >

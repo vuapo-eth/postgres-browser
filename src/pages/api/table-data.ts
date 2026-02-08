@@ -17,7 +17,7 @@ export default async function handler(
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { postgres_url, table_name, page = 1, limit = 20 } = req.body;
+  const { postgres_url, table_name, page = 1, limit = 20, sort_column, sort_direction = "asc" } = req.body;
 
   if (!postgres_url || !table_name) {
     return res
@@ -41,10 +41,19 @@ export default async function handler(
     );
     const total_rows = parseInt(count_result.rows[0].count);
 
-    const data_result = await client.query(
-      `SELECT * FROM ${table_name_escaped} LIMIT $1 OFFSET $2`,
-      [limit, offset]
-    );
+    let query = `SELECT * FROM ${table_name_escaped}`;
+    const query_params: any[] = [];
+    
+    if (sort_column) {
+      const column_escaped = `"${sort_column.replace(/"/g, '""')}"`;
+      const direction = sort_direction === "desc" ? "DESC" : "ASC";
+      query += ` ORDER BY ${column_escaped} ${direction}`;
+    }
+    
+    query += ` LIMIT $${query_params.length + 1} OFFSET $${query_params.length + 2}`;
+    query_params.push(limit, offset);
+
+    const data_result = await client.query(query, query_params);
 
     const columns = data_result.fields.map((field) => field.name);
     const rows = data_result.rows.map((row) =>
