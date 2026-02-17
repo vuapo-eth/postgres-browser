@@ -913,6 +913,27 @@ function TableView({
     }));
   };
 
+  const select_all_columns = () => {
+    set_column_visibility((prev) => {
+      const next = { ...prev };
+      table_data.columns.forEach((_, idx) => {
+        next[idx] = true;
+      });
+      return next;
+    });
+  };
+
+  const unselect_all_columns = () => {
+    const id_column_idx = table_data.columns.findIndex((name) => String(name).toLowerCase() === "id");
+    set_column_visibility((prev) => {
+      const next = { ...prev };
+      table_data.columns.forEach((_, idx) => {
+        next[idx] = idx === id_column_idx;
+      });
+      return next;
+    });
+  };
+
   const set_column_color = (column_idx: number, color: string) => {
     set_column_colors((prev) => ({
       ...prev,
@@ -964,6 +985,23 @@ function TableView({
       const column_name = table_data.columns[idx];
       return column_name && column_name.trim() !== "";
     });
+  };
+
+  const get_valid_column_indices = () =>
+    column_order.filter((idx) => {
+      const name = table_data.columns[idx];
+      return name && String(name).trim() !== "";
+    });
+
+  const is_all_selected = () => {
+    const valid = get_valid_column_indices();
+    return valid.length > 0 && valid.every((idx) => column_visibility[idx] !== false);
+  };
+
+  const is_unselect_all_state = () => {
+    const id_idx = table_data.columns.findIndex((name) => String(name).toLowerCase() === "id");
+    const valid = get_valid_column_indices();
+    return valid.every((idx) => column_visibility[idx] === (idx === id_idx));
   };
 
   const highlight_sql = (sql: string): React.ReactNode[] => {
@@ -1515,15 +1553,35 @@ function TableView({
         <>
           {column_badges_expanded && (
             <div className="mb-4 flex flex-col gap-3 flex-shrink-0">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#4a4a4a]" />
-                <input
-                  type="text"
-                  value={search_query}
-                  onChange={(e) => set_search_query(e.target.value)}
-                  placeholder="Search column names..."
-                  className="w-full pl-10 pr-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-sm"
-                />
+              <div className="flex items-center gap-3">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#4a4a4a]" />
+                  <input
+                    type="text"
+                    value={search_query}
+                    onChange={(e) => set_search_query(e.target.value)}
+                    placeholder="Search column names..."
+                    className="w-full pl-10 pr-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-sm"
+                  />
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    type="button"
+                    onClick={select_all_columns}
+                    disabled={is_all_selected()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#2a2a2a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-[#3ECF8E] hover:bg-[#3ECF8E]/10 hover:border-[#3ECF8E]/50"
+                  >
+                    Select all
+                  </button>
+                  <button
+                    type="button"
+                    onClick={unselect_all_columns}
+                    disabled={is_unselect_all_state()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#2a2a2a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-[#4a4a4a] hover:text-white hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50"
+                  >
+                    Unselect all
+                  </button>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
               {column_order.filter((idx) => {
@@ -1544,7 +1602,13 @@ function TableView({
                   onDragOver={(e) => handle_drag_over(e, column_idx)}
                   onDrop={() => handle_drop(column_idx)}
                   onDragEnd={handle_drag_end}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all cursor-move ${
+                  onClick={(e) => {
+                    const target = e.target as HTMLElement;
+                    if (!target.closest("button")) {
+                      toggle_column_visibility(column_idx);
+                    }
+                  }}
+                  className={`flex-none inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all cursor-move ${
                     is_dragged
                       ? "opacity-50 bg-[#1f1f1f] border-[#3ECF8E]"
                       : is_drag_over
@@ -1665,8 +1729,8 @@ function TableView({
                           backgroundColor: get_column_color_with_opacity(column_idx) || undefined,
                         }}
                       >
-                        <div className="flex items-center gap-2">
-                          <div className="truncate flex-1">{column || `Column ${column_idx + 1}`}</div>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="truncate min-w-0">{column || `Column ${column_idx + 1}`}</div>
                           <div className="flex flex-col flex-shrink-0">
                             <button
                               onClick={(e) => {
@@ -1738,7 +1802,7 @@ function TableView({
                               }
                             }}
                           >
-                            <div className="min-w-0 w-full">
+                            <div className="inline-block min-w-0 max-w-full">
                               {cell === null || cell === undefined
                                 ? (
                                     <span className="text-[#4a4a4a] italic">null</span>
@@ -1747,13 +1811,13 @@ function TableView({
                                     const uuid_list = parse_uuids(cell);
                                     if (uuid_list) {
                                       return (
-                                        <div className="flex flex-col gap-1 min-w-0">
+                                        <div className="flex flex-col gap-1 min-w-0 w-fit max-w-full">
                                           {uuid_list.map((uuid, idx) => {
                                             const colors = get_uuid_color(uuid);
                                             return (
                                               <span 
                                                 key={idx}
-                                                className="block px-2 py-1 rounded border font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis w-full"
+                                                className="inline-block max-w-full px-2 py-1 rounded border font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis"
                                                 style={{ 
                                                   backgroundColor: colors.bg_rgba,
                                                   color: colors.text,
@@ -1770,7 +1834,7 @@ function TableView({
                                       const colors = get_uuid_color(cell_text);
                                       return (
                                         <span 
-                                          className="block px-2 py-1 rounded border font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis w-full"
+                                          className="inline-block max-w-full px-2 py-1 rounded border font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis"
                                           style={{ 
                                             backgroundColor: colors.bg_rgba,
                                             color: colors.text,
@@ -1816,13 +1880,13 @@ function TableView({
                                       );
                                     } else if (!show_images && is_image_url(cell)) {
                                       return (
-                                        <span className="truncate block">
+                                        <span className="inline-block max-w-full truncate">
                                           <span className="mr-1">🖼️</span>
                                           {cell_text}
                                         </span>
                                       );
                                     } else {
-                                      return <span className="truncate block">{cell_text}</span>;
+                                      return <span className="inline-block max-w-full truncate">{cell_text}</span>;
                                     }
                                   })()}
                             </div>
