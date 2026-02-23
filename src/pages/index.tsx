@@ -371,7 +371,6 @@ export default function Home() {
   const run_custom_sql = async (sql: string) => {
     set_is_loading(true);
     set_error(null);
-    set_where_items([]);
     try {
       const response = await fetch("/api/run-sql", {
         method: "POST",
@@ -802,20 +801,6 @@ function WhereBlocksRecursive({
           <span className="text-lg leading-none">+</span>
           <span>Add group</span>
         </button>
-        {items.length > 0 && (
-          <button
-            onClick={async () => {
-              if (selected_table) {
-                const where_clause = build_where_clause(items);
-                handle_page_change(1);
-                await load_table_data(selected_table, 1, sort_column, sort_direction, where_clause);
-              }
-            }}
-            className="px-4 py-2 bg-[#3ECF8E] hover:bg-[#24B47E] text-black font-semibold rounded-lg transition-all text-xs w-fit"
-          >
-            Apply Filters
-          </button>
-        )}
       </div>
     );
   }
@@ -854,9 +839,13 @@ function WhereBlocksRecursive({
   const group = item;
   const parent_path = path.slice(0, -1);
   const group_idx = path[path.length - 1];
+  const remove_group = () => set_where_items((prev) => parent_path.length === 0 ? prev.filter((_, i) => i !== group_idx).map((g, i) => i === 0 && g.type === "group" ? { ...g, connector: null } : g) : apply_update_at_path(prev, parent_path, (p) => p.type === "group" ? { ...p, children: p.children.filter((_, j) => j !== group_idx) } : p));
   return (
-    <div className="rounded-lg border border-[#2a2a2a] p-2 bg-[#1a1a1a]">
-      <div className="flex items-center gap-2 mb-2">
+    <div className="relative rounded-lg border border-[#2a2a2a] p-2 bg-[#1a1a1a]">
+      <button onClick={remove_group} className="absolute top-1.5 right-1.5 p-1 rounded text-[#8b8b8b] hover:text-[#EF4444] hover:bg-[#2a2a2a] transition-colors" title="Remove group">
+        <X className="w-3.5 h-3.5" />
+      </button>
+      <div className="flex items-center gap-2 mb-2 pr-6">
         <span className="text-[#8b8b8b] text-xs">within group:</span>
         <select value={group.combine} onChange={(e) => update_at(path, (g) => ({ ...g, combine: e.target.value as "AND" | "OR" }))} className="px-2 py-1 bg-[#0f0f0f] border border-[#2a2a2a] rounded text-xs font-medium" style={{ color: group.combine === "AND" ? "#3ECF8E" : "#3B82F6" }}>
           <option value="AND">AND</option><option value="OR">OR</option>
@@ -873,11 +862,6 @@ function WhereBlocksRecursive({
           + group
         </button>
       </div>
-      {group.children.length > 0 && (
-        <button onClick={() => set_where_items((prev) => parent_path.length === 0 ? prev.filter((_, i) => i !== group_idx).map((g, i) => i === 0 && g.type === "group" ? { ...g, connector: null } : g) : apply_update_at_path(prev, parent_path, (p) => p.type === "group" ? { ...p, children: p.children.filter((_, j) => j !== group_idx) } : p))} className="mt-2 text-xs text-[#8b8b8b] hover:text-[#EF4444]">
-          Remove group
-        </button>
-      )}
     </div>
   );
 }
