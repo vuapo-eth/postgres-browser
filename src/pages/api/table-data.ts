@@ -36,10 +36,10 @@ export default async function handler(
     const offset = (page - 1) * limit;
 
     const table_name_escaped = `"${table_name.replace(/"/g, '""')}"`;
-    
-    const count_result = await client.query(
-      `SELECT COUNT(*) as count FROM ${table_name_escaped}`
-    );
+    const count_sql = where_clause && where_clause.trim() !== ""
+      ? `SELECT COUNT(*) as count FROM ${table_name_escaped} WHERE ${where_clause}`
+      : `SELECT COUNT(*) as count FROM ${table_name_escaped}`;
+    const count_result = await client.query(count_sql);
     const total_rows = parseInt(count_result.rows[0].count);
 
     let query = `SELECT * FROM ${table_name_escaped}`;

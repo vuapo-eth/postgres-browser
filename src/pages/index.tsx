@@ -53,6 +53,8 @@ export default function Home() {
   const [sort_column, set_sort_column] = useState<string | null>(null);
   const [sort_direction, set_sort_direction] = useState<"asc" | "desc">("asc");
   const [where_items, set_where_items] = useState<WhereItem[]>([]);
+  const where_items_ref = useRef<WhereItem[]>(where_items);
+  where_items_ref.current = where_items;
 
   useEffect(() => {
     const stored = localStorage.getItem("starred_tables");
@@ -163,7 +165,18 @@ export default function Home() {
   };
 
   const handle_sort = async (column_name: string, force_direction?: "asc" | "desc") => {
-    const where_clause = where_items.length > 0 ? build_where_clause(where_items) : undefined;
+    const current_items = where_items_ref.current;
+    const where_clause = current_items.length > 0 ? build_where_clause(current_items) : undefined;
+    const direction = force_direction ?? (sort_column === column_name ? (sort_direction === "asc" ? "desc" : "asc") : "asc");
+    const current_query = table_data?.query;
+    const run_with_query = !where_clause && typeof current_query === "string" && /WHERE/i.test(current_query);
+    if (run_with_query && current_query) {
+      set_sort_column(column_name);
+      set_sort_direction(direction);
+      const new_query = apply_sort_to_query(current_query, column_name, direction, current_page);
+      await run_custom_sql(new_query);
+      return;
+    }
     if (force_direction) {
       set_sort_column(column_name);
       set_sort_direction(force_direction);
@@ -228,6 +241,25 @@ export default function Home() {
       const connector = idx > 0 && item.type === "group" && item.connector ? ` ${item.connector} ` : "";
       return connector + sql;
     }).join("");
+  };
+
+  const apply_sort_to_query = (query: string, sort_col: string, sort_dir: "asc" | "desc", page: number): string => {
+    let q = query.replace(/\s*;\s*$/, "").trim();
+    q = q.replace(/\s+ORDER\s+BY\s+.+$/i, "");
+    q = q.replace(/\s+OFFSET\s+\d+(\s+LIMIT\s+\d+)?\s*$/i, "");
+    q = q.replace(/\s+LIMIT\s+\d+\s*$/i, "");
+    const col_escaped = `"${sort_col.replace(/"/g, '""')}"`;
+    const dir = sort_dir === "desc" ? "DESC" : "ASC";
+    const offset = (page - 1) * 20;
+    return `${q} ORDER BY ${col_escaped} ${dir} LIMIT 20 OFFSET ${offset}`;
+  };
+
+  const apply_page_to_query = (query: string, page: number): string => {
+    let q = query.replace(/\s*;\s*$/, "").trim();
+    q = q.replace(/\s+OFFSET\s+\d+(\s+LIMIT\s+\d+)?\s*$/i, "");
+    q = q.replace(/\s+LIMIT\s+\d+\s*$/i, "");
+    const offset = (page - 1) * 20;
+    return `${q} LIMIT 20 OFFSET ${offset}`;
   };
 
   const groups_to_items = (groups: WhereGroup[]): WhereItem[] =>
@@ -334,7 +366,7 @@ export default function Home() {
     try {
       const final_sort_col = sort_col !== undefined ? sort_col : sort_column;
       const final_sort_dir = sort_dir !== undefined ? sort_dir : sort_direction;
-      const final_where_clause = where_clause !== undefined ? where_clause : (where_items.length > 0 ? build_where_clause(where_items) : undefined);
+      const final_where_clause = where_clause !== undefined ? where_clause : (where_items_ref.current.length > 0 ? build_where_clause(where_items_ref.current) : undefined);
 
       const response = await fetch("/api/table-data", {
         method: "POST",
@@ -359,7 +391,7 @@ export default function Home() {
       set_table_data(data);
 
       if (data.query) {
-        save_query_to_history(table_name, data.query, where_items, final_sort_col, final_sort_dir);
+        save_query_to_history(table_name, data.query, where_items_ref.current, final_sort_col, final_sort_dir);
       }
     } catch (err: any) {
       set_error(err.message || "Failed to load table data");
@@ -391,11 +423,17 @@ export default function Home() {
   };
 
   const handle_page_change = (new_page: number) => {
-    if (selected_table) {
-      set_current_page(new_page);
-      router.push({ query: { ...router.query, page: new_page.toString() } }, undefined, { shallow: true });
-      load_table_data(selected_table, new_page, sort_column, sort_direction);
+    if (!selected_table) return;
+    set_current_page(new_page);
+    router.push({ query: { ...router.query, page: new_page.toString() } }, undefined, { shallow: true });
+    const current_items = where_items_ref.current;
+    const where_clause = current_items.length > 0 ? build_where_clause(current_items) : undefined;
+    if (!where_clause && table_data?.query && /WHERE/i.test(table_data.query)) {
+      const new_query = apply_page_to_query(table_data.query, new_page);
+      run_custom_sql(new_query);
+      return;
     }
+    load_table_data(selected_table, new_page, sort_column, sort_direction, where_clause);
   };
 
   const total_pages = table_data
@@ -855,12 +893,24 @@ function WhereBlocksRecursive({
         {group.children.map((_, child_idx) => (
           <WhereBlocksRecursive key={get_item_at_path(items, path.concat(child_idx))?.id} items={items} path={path.concat(child_idx)} set_where_items={set_where_items} apply_update_at_path={apply_update_at_path} table_data={table_data} first_column={first_column} selected_table={selected_table} sort_column={sort_column} sort_direction={sort_direction} load_table_data={load_table_data} handle_page_change={handle_page_change} build_where_clause={build_where_clause} />
         ))}
-        <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "condition", id: Date.now().toString(), column: first_column, operator: "=", value: "" }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
-          + condition
-        </button>
-        <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "group", id: Date.now().toString(), connector: it.children.length > 0 ? "AND" : null, combine: "AND", children: [{ type: "condition", id: (Date.now() + 1).toString(), column: first_column, operator: "=", value: "" }] }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
-          + group
-        </button>
+        {group.children.length === 0 ? (
+          <>
+            <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "condition", id: Date.now().toString(), column: first_column, operator: "=", value: "" }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
+              + condition
+            </button>
+            <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "group", id: Date.now().toString(), connector: it.children.length > 0 ? "AND" : null, combine: "AND", children: [{ type: "condition", id: (Date.now() + 1).toString(), column: first_column, operator: "=", value: "" }] }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
+              + group
+            </button>
+          </>
+        ) : group.children.some((c) => c.type === "group") ? (
+          <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "group", id: Date.now().toString(), connector: it.children.length > 0 ? "AND" : null, combine: "AND", children: [{ type: "condition", id: (Date.now() + 1).toString(), column: first_column, operator: "=", value: "" }] }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
+            +
+          </button>
+        ) : (
+          <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "condition", id: Date.now().toString(), column: first_column, operator: "=", value: "" }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
+            +
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1443,6 +1493,15 @@ function TableView({
     return { bg, text, bg_rgba };
   };
 
+  const query_after_where = (query: string): string => {
+    const q = query.trim();
+    const upper = q.toUpperCase();
+    if (upper.startsWith("WHERE ")) return q.slice(6).trim();
+    const idx = upper.indexOf(" WHERE ");
+    if (idx === -1) return "—";
+    return q.slice(idx + 7).trim();
+  };
+
   const format_timestamp = (timestamp: number): string => {
     const date = new Date(timestamp);
     const now = new Date();
@@ -1466,6 +1525,7 @@ function TableView({
 
   const restore_query_from_history = async (history_entry: {
     query: string;
+    where_items?: WhereItem[];
     where_groups?: WhereGroup[];
     where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }>;
     sort_column: string | null;
@@ -1478,11 +1538,9 @@ function TableView({
     set_sort_direction(history_entry.sort_direction);
     const items = entry_to_items(history_entry);
     set_where_items(JSON.parse(JSON.stringify(items)));
-
-    const where_clause = items.length > 0 ? build_where_clause(items) : undefined;
     handle_page_change(1);
-    await load_table_data(selected_table, 1, history_entry.sort_column, history_entry.sort_direction, where_clause);
     set_is_history_open(false);
+    await run_custom_sql(history_entry.query);
   };
 
   const handle_generate_ai_sql = async () => {
@@ -1647,8 +1705,8 @@ function TableView({
                               >
                                 <div className="flex items-start justify-between gap-2 mb-1">
                                   <div className="flex-1 min-w-0">
-                                    <div className="font-mono text-xs text-white truncate mb-1">
-                                      {entry.query.length > 80 ? `${entry.query.substring(0, 80)}...` : entry.query}
+                                    <div className="font-mono text-xs text-white truncate mb-1" style={{ fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }}>
+                                      {(() => { const s = query_after_where(entry.query); const display = s.length > 80 ? `${s.substring(0, 80)}...` : s; return highlight_sql(display); })()}
                                     </div>
                                     <div className="flex items-center gap-2 text-xs text-[#4a4a4a]">
                                       {entry.sort_column && (
@@ -1793,8 +1851,8 @@ function TableView({
                               >
                                 <div className="flex items-start justify-between gap-2 mb-1">
                                   <div className="flex-1 min-w-0">
-                                    <div className="font-mono text-xs text-white truncate mb-1">
-                                      {entry.query.length > 80 ? `${entry.query.substring(0, 80)}...` : entry.query}
+                                    <div className="font-mono text-xs text-white truncate mb-1" style={{ fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }}>
+                                      {(() => { const s = query_after_where(entry.query); const display = s.length > 80 ? `${s.substring(0, 80)}...` : s; return highlight_sql(display); })()}
                                     </div>
                                     <div className="flex items-center gap-2 text-xs text-[#4a4a4a]">
                                       {entry.sort_column && (
