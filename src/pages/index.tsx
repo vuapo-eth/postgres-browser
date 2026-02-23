@@ -741,7 +741,7 @@ function TableView({
   const [drag_over_column, set_drag_over_column] = useState<number | null>(null);
   const [show_images, set_show_images] = useState(false);
   const [search_query, set_search_query] = useState("");
-  const [column_badges_expanded, set_column_badges_expanded] = useState(true);
+  const [column_badges_expanded, set_column_badges_expanded] = useState(false);
   const [query_view_mode, set_query_view_mode] = useState<"sql" | "blocks">("sql");
   const [is_history_open, set_is_history_open] = useState(false);
   const [is_ai_modal_open, set_is_ai_modal_open] = useState(false);
