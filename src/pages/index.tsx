@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/router";
-import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, History } from "lucide-react";
+import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, History, Play } from "lucide-react";
 
 type TableInfo = {
   table_name: string;
@@ -313,6 +313,29 @@ export default function Home() {
     }
   };
 
+  const run_custom_sql = async (sql: string) => {
+    set_is_loading(true);
+    set_error(null);
+    set_where_conditions([]);
+    try {
+      const response = await fetch("/api/run-sql", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ postgres_url, query: sql }),
+      });
+      if (!response.ok) {
+        const error_data = await response.json();
+        throw new Error(error_data.error || "Failed to run query");
+      }
+      const data = await response.json();
+      set_table_data(data);
+    } catch (err: any) {
+      set_error(err.message || "Failed to run query");
+    } finally {
+      set_is_loading(false);
+    }
+  };
+
   const handle_page_change = (new_page: number) => {
     if (selected_table) {
       set_current_page(new_page);
@@ -385,6 +408,7 @@ export default function Home() {
                     build_where_clause={build_where_clause}
                     selected_table={selected_table}
                     load_table_data={load_table_data}
+                    run_custom_sql={run_custom_sql}
                     get_query_history={get_query_history}
                     set_sort_column={set_sort_column}
                     set_sort_direction={set_sort_direction}
@@ -650,6 +674,7 @@ function TableView({
   build_where_clause,
   selected_table,
   load_table_data,
+  run_custom_sql,
   get_query_history,
   set_sort_column,
   set_sort_direction,
@@ -682,6 +707,7 @@ function TableView({
   build_where_clause: (conditions: typeof where_conditions) => string;
   selected_table: string | null;
   load_table_data: (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc", where_clause?: string) => Promise<void>;
+  run_custom_sql: (sql: string) => Promise<void>;
   get_query_history: (table_name: string) => Array<{
     query: string;
     where_conditions: Array<{
@@ -718,6 +744,14 @@ function TableView({
   const [column_badges_expanded, set_column_badges_expanded] = useState(true);
   const [query_view_mode, set_query_view_mode] = useState<"sql" | "blocks">("sql");
   const [is_history_open, set_is_history_open] = useState(false);
+  const [is_ai_modal_open, set_is_ai_modal_open] = useState(false);
+  const [ai_prompt, set_ai_prompt] = useState("");
+  const [is_ai_generating, set_is_ai_generating] = useState(false);
+  const [editable_sql, set_editable_sql] = useState(table_data.query || "");
+
+  useEffect(() => {
+    set_editable_sql(table_data.query || "");
+  }, [table_data.query]);
 
   const predefined_colors = [
     { name: "Blue", value: "#3B82F6" },
@@ -737,8 +771,11 @@ function TableView({
   const handle_mouse_move_ref = useRef<((e: MouseEvent) => void) | undefined>(undefined);
   const handle_mouse_up_ref = useRef<(() => void) | undefined>(undefined);
 
+  const columns_key_ref = useRef<string>("");
   useEffect(() => {
-    if (table_data.columns.length > 0 && column_order.length === 0) {
+    const columns_key = table_data.columns.join(",");
+    if (table_data.columns.length > 0 && columns_key !== columns_key_ref.current) {
+      columns_key_ref.current = columns_key;
       const initial_order = table_data.columns.map((_, idx) => idx);
       set_column_order(initial_order);
       const initial_visibility: Record<number, boolean> = {};
@@ -750,7 +787,7 @@ function TableView({
       set_column_visibility(initial_visibility);
       set_column_colors(initial_colors);
     }
-  }, [table_data.columns, column_order.length]);
+  }, [table_data.columns]);
 
   const default_width = 200;
   const min_width = 50;
@@ -777,15 +814,21 @@ function TableView({
           set_is_history_open(false);
         }
       }
+      if (is_ai_modal_open) {
+        const target = e.target as HTMLElement;
+        if (!target.closest('[data-ai-modal]')) {
+          set_is_ai_modal_open(false);
+        }
+      }
     };
 
-    if (color_picker_open !== null || is_history_open) {
+    if (color_picker_open !== null || is_history_open || is_ai_modal_open) {
       document.addEventListener("mousedown", handle_click_outside);
       return () => {
         document.removeEventListener("mousedown", handle_click_outside);
       };
     }
-  }, [color_picker_open, is_history_open]);
+  }, [color_picker_open, is_history_open, is_ai_modal_open]);
 
   const get_column_width = (column_idx: number) => {
     return column_widths_ref.current[column_idx] ?? default_width;
@@ -1246,10 +1289,87 @@ function TableView({
     set_is_history_open(false);
   };
 
+  const handle_generate_ai_sql = async () => {
+    if (!ai_prompt.trim()) return;
+    set_is_ai_generating(true);
+    try {
+      const gen_res = await fetch("/api/generate-sql", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          postgres_url,
+          table_name,
+          prompt: ai_prompt.trim(),
+        }),
+      });
+      const gen_data = await gen_res.json();
+      if (!gen_res.ok) {
+        throw new Error(gen_data.error || "Failed to generate SQL");
+      }
+      await run_custom_sql(gen_data.sql);
+      set_is_ai_modal_open(false);
+      set_ai_prompt("");
+    } catch (err: any) {
+      set_toast({ message: err.message || "Failed to generate SQL", type: "error" });
+      setTimeout(() => set_toast(null), 4000);
+    } finally {
+      set_is_ai_generating(false);
+    }
+  };
+
   const query_history = get_query_history(table_name);
 
   return (
     <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg p-6 flex flex-col h-full min-h-0">
+      {is_ai_modal_open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => !is_ai_generating && set_is_ai_modal_open(false)}
+        >
+          <div
+            className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg shadow-xl w-full max-w-lg mx-4 p-6"
+            onClick={(e) => e.stopPropagation()}
+            data-ai-modal
+          >
+            <h3 className="text-lg font-semibold text-white mb-2">Generate SQL with AI</h3>
+            <p className="text-sm text-[#8b8b8b] mb-4">
+              Describe what you want to query from table &quot;{table_name}&quot;. The AI will generate a SELECT statement (columns may change).
+            </p>
+            <textarea
+              value={ai_prompt}
+              onChange={(e) => set_ai_prompt(e.target.value)}
+              placeholder="e.g. show only id and name, order by name"
+              className="w-full h-24 px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] resize-none text-sm"
+              disabled={is_ai_generating}
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => !is_ai_generating && set_is_ai_modal_open(false)}
+                className="px-4 py-2 bg-[#2a2a2a] text-white rounded-lg hover:bg-[#333] text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handle_generate_ai_sql}
+                disabled={is_ai_generating || !ai_prompt.trim()}
+                className="px-4 py-2 bg-[#3ECF8E] text-black font-medium rounded-lg hover:bg-[#24B47E] disabled:opacity-50 disabled:cursor-not-allowed text-sm flex items-center gap-2"
+              >
+                {is_ai_generating ? (
+                  <>
+                    <span className="inline-block w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                    Generate
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Generate
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="mb-6 flex flex-col gap-4 flex-shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
@@ -1286,143 +1406,170 @@ function TableView({
         </div>
         {query_view_mode === "sql" && table_data.query && (
           <div className="relative">
-            <div className="w-full px-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg">
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex-1"></div>
-                <div className="flex items-center gap-2">
-                  <div className="relative" data-history-dropdown>
-                    <button
-                      onClick={() => set_is_history_open(!is_history_open)}
-                      className="flex items-center gap-2 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs"
-                    >
-                      <History className="w-3.5 h-3.5" />
-                      <span>History</span>
-                      {query_history.length > 0 && (
-                        <span className="px-1.5 py-0.5 bg-[#3ECF8E] text-black text-xs rounded-full font-semibold">
-                          {query_history.length}
-                        </span>
-                      )}
-                    </button>
-                    {is_history_open && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => set_is_history_open(false)}
-                        />
-                        <div className="absolute right-0 top-full mt-2 w-96 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg shadow-lg z-50 max-h-[400px] overflow-y-auto" data-history-dropdown>
-                          <div className="p-3 border-b border-[#2a2a2a] flex items-center justify-between">
-                            <h3 className="text-sm font-semibold text-white">Query History</h3>
-                            <button
-                              onClick={() => set_is_history_open(false)}
-                              className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
-                            >
-                              <X className="w-4 h-4 text-[#8b8b8b]" />
-                            </button>
+            <div className="w-full min-h-12 px-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg relative">
+              <div className="absolute top-2 right-2 flex items-center gap-2 flex-nowrap flex-shrink-0 z-10">
+                <div className="relative flex-shrink-0" data-history-dropdown>
+                  <button
+                    onClick={() => set_is_history_open(!is_history_open)}
+                    className="flex items-center gap-2 flex-shrink-0 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs whitespace-nowrap"
+                  >
+                    <History className="w-3.5 h-3.5" />
+                    <span>History</span>
+                    {query_history.length > 0 && (
+                      <span className="px-1.5 py-0.5 bg-[#3ECF8E] text-black text-xs rounded-full font-semibold">
+                        {query_history.length}
+                      </span>
+                    )}
+                  </button>
+                  {is_history_open && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => set_is_history_open(false)}
+                      />
+                      <div className="absolute right-0 top-full mt-2 w-96 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg shadow-lg z-50 max-h-[400px] overflow-y-auto" data-history-dropdown>
+                        <div className="p-3 border-b border-[#2a2a2a] flex items-center justify-between">
+                          <h3 className="text-sm font-semibold text-white">Query History</h3>
+                          <button
+                            onClick={() => set_is_history_open(false)}
+                            className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
+                          >
+                            <X className="w-4 h-4 text-[#8b8b8b]" />
+                          </button>
+                        </div>
+                        {query_history.length === 0 ? (
+                          <div className="p-4 text-center text-sm text-[#4a4a4a]">
+                            No query history
                           </div>
-                          {query_history.length === 0 ? (
-                            <div className="p-4 text-center text-sm text-[#4a4a4a]">
-                              No query history
-                            </div>
-                          ) : (
-                            <div className="divide-y divide-[#2a2a2a]">
-                              {query_history.map((entry, idx) => (
-                                <button
-                                  key={idx}
-                                  onClick={() => restore_query_from_history(entry)}
-                                  className="w-full p-3 text-left hover:bg-[#1f1f1f] transition-colors group"
-                                >
-                                  <div className="flex items-start justify-between gap-2 mb-1">
-                                    <div className="flex-1 min-w-0">
-                                      <div className="font-mono text-xs text-white truncate mb-1">
-                                        {entry.query.length > 80 ? `${entry.query.substring(0, 80)}...` : entry.query}
-                                      </div>
-                                      <div className="flex items-center gap-2 text-xs text-[#4a4a4a]">
-                                        {entry.sort_column && (
-                                          <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
-                                            Sort: {entry.sort_column} {entry.sort_direction}
-                                          </span>
-                                        )}
-                                        {entry.where_conditions && entry.where_conditions.length > 0 && (
-                                          <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
-                                            {entry.where_conditions.length} filter{entry.where_conditions.length !== 1 ? "s" : ""}
-                                          </span>
-                                        )}
-                                      </div>
+                        ) : (
+                          <div className="divide-y divide-[#2a2a2a]">
+                            {query_history.map((entry, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => restore_query_from_history(entry)}
+                                className="w-full p-3 text-left hover:bg-[#1f1f1f] transition-colors group"
+                              >
+                                <div className="flex items-start justify-between gap-2 mb-1">
+                                  <div className="flex-1 min-w-0">
+                                    <div className="font-mono text-xs text-white truncate mb-1">
+                                      {entry.query.length > 80 ? `${entry.query.substring(0, 80)}...` : entry.query}
                                     </div>
-                                    <div className="text-xs text-[#4a4a4a] whitespace-nowrap">
-                                      {format_timestamp(entry.timestamp)}
+                                    <div className="flex items-center gap-2 text-xs text-[#4a4a4a]">
+                                      {entry.sort_column && (
+                                        <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
+                                          Sort: {entry.sort_column} {entry.sort_direction}
+                                        </span>
+                                      )}
+                                      {entry.where_conditions && entry.where_conditions.length > 0 && (
+                                        <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
+                                          {entry.where_conditions.length} filter{entry.where_conditions.length !== 1 ? "s" : ""}
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => set_query_view_mode("sql")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-                      query_view_mode === "sql"
-                        ? "bg-[#3ECF8E] text-black"
-                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
-                    }`}
-                  >
-                    <Code className="w-3.5 h-3.5" />
-                    SQL
-                  </button>
-                  <button
-                    onClick={() => set_query_view_mode("blocks")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-                      (query_view_mode as "sql" | "blocks") === "blocks"
-                        ? "bg-[#3ECF8E] text-black"
-                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
-                    }`}
-                  >
-                    <Blocks className="w-3.5 h-3.5" />
-                    Blocks
-                  </button>
+                                  <div className="text-xs text-[#4a4a4a] whitespace-nowrap">
+                                    {format_timestamp(entry.timestamp)}
+                                  </div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
+                <button
+                  onClick={() => set_is_ai_modal_open(true)}
+                  className="flex items-center gap-2 flex-shrink-0 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs whitespace-nowrap"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Generate with AI</span>
+                </button>
+                <button
+                  onClick={() => set_query_view_mode("sql")}
+                  className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                    query_view_mode === "sql"
+                      ? "bg-[#3ECF8E] text-black"
+                      : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                  }`}
+                >
+                  <Code className="w-3.5 h-3.5" />
+                  SQL
+                </button>
+                <button
+                  onClick={() => set_query_view_mode("blocks")}
+                  className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                    (query_view_mode as "sql" | "blocks") === "blocks"
+                      ? "bg-[#3ECF8E] text-black"
+                      : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                  }`}
+                >
+                  <Blocks className="w-3.5 h-3.5" />
+                  Blocks
+                </button>
+                <button
+                  onClick={() => run_custom_sql(editable_sql)}
+                  disabled={!editable_sql.trim()}
+                  className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#3ECF8E] text-black hover:bg-[#24B47E] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  Run
+                </button>
               </div>
-              <div className="font-mono text-xs overflow-x-auto">
-                <pre className="text-white whitespace-pre-wrap break-words">
-                  {highlight_sql(table_data.query)}
-                </pre>
+              <div
+                className="overflow-x-auto pr-52 relative min-h-12 text-xs"
+                style={{ fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }}
+              >
+                <div className="whitespace-pre-wrap break-words text-white p-0 min-h-12 pointer-events-none">
+                  {highlight_sql(editable_sql)}
+                </div>
+                <textarea
+                  value={editable_sql}
+                  onChange={(e) => set_editable_sql(e.target.value)}
+                  className="absolute inset-0 w-full min-h-12 p-0 bg-transparent border-0 resize-none text-transparent caret-white whitespace-pre-wrap break-words text-xs focus:outline-none focus:ring-0 selection:bg-[#3ECF8E]/30"
+                  spellCheck={false}
+                  style={{ caretColor: "#fff", fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }}
+                />
               </div>
             </div>
           </div>
         )}
         {query_view_mode === "blocks" && (
           <div className="relative">
-            <div className="w-full px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg">
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-xs text-[#8b8b8b]">WHERE</div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => set_query_view_mode("sql")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-                      (query_view_mode as "sql" | "blocks") === "sql"
-                        ? "bg-[#3ECF8E] text-black"
-                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
-                    }`}
-                  >
-                    <Code className="w-3.5 h-3.5" />
-                    SQL
-                  </button>
-                  <button
-                    onClick={() => set_query_view_mode("blocks")}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 ${
-                      query_view_mode === "blocks"
-                        ? "bg-[#3ECF8E] text-black"
-                        : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
-                    }`}
-                  >
-                    <Blocks className="w-3.5 h-3.5" />
-                    Blocks
-                  </button>
-                </div>
+            <div className="w-full min-h-12 px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg relative">
+              <div className="absolute top-2 right-2 flex items-center gap-2 flex-nowrap flex-shrink-0 z-10">
+                <button
+                  onClick={() => set_is_ai_modal_open(true)}
+                  className="flex items-center gap-2 flex-shrink-0 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs whitespace-nowrap"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Generate with AI</span>
+                </button>
+                <button
+                  onClick={() => set_query_view_mode("sql")}
+                  className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                    (query_view_mode as "sql" | "blocks") === "sql"
+                      ? "bg-[#3ECF8E] text-black"
+                      : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                  }`}
+                >
+                  <Code className="w-3.5 h-3.5" />
+                  SQL
+                </button>
+                <button
+                  onClick={() => set_query_view_mode("blocks")}
+                  className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
+                    query_view_mode === "blocks"
+                      ? "bg-[#3ECF8E] text-black"
+                      : "bg-[#1a1a1a] border border-[#2a2a2a] text-[#8b8b8b] hover:text-white"
+                  }`}
+                >
+                  <Blocks className="w-3.5 h-3.5" />
+                  Blocks
+                </button>
               </div>
+              <div className="text-xs text-[#8b8b8b] mb-2 pr-52">WHERE</div>
               <div className="flex flex-col gap-2">
                 {where_conditions.length === 0 ? (
                   <div className="text-xs text-[#4a4a4a] italic py-2">No conditions added</div>
@@ -1552,24 +1699,24 @@ function TableView({
       ) : (
         <>
           {column_badges_expanded && (
-            <div className="mb-4 flex flex-col gap-3 flex-shrink-0">
-              <div className="flex items-center gap-3">
+            <div className="mb-3 flex flex-col gap-2 flex-shrink-0">
+              <div className="flex items-center gap-2">
                 <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#4a4a4a]" />
+                  <Search className="absolute left-2.5 top-1/2 transform -translate-y-1/2 w-3.5 h-3.5 text-[#4a4a4a]" />
                   <input
                     type="text"
                     value={search_query}
                     onChange={(e) => set_search_query(e.target.value)}
                     placeholder="Search column names..."
-                    className="w-full pl-10 pr-4 py-2 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-sm"
+                    className="w-full pl-8 pr-3 py-1.5 bg-[#0f0f0f] border border-[#2a2a2a] rounded-md text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all text-xs"
                   />
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
+                <div className="flex items-center gap-1.5 flex-shrink-0">
                   <button
                     type="button"
                     onClick={select_all_columns}
                     disabled={is_all_selected()}
-                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#2a2a2a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-[#3ECF8E] hover:bg-[#3ECF8E]/10 hover:border-[#3ECF8E]/50"
+                    className="px-2 py-1 text-[11px] font-medium rounded-md border border-[#2a2a2a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-[#3ECF8E] hover:bg-[#3ECF8E]/10 hover:border-[#3ECF8E]/50"
                   >
                     Select all
                   </button>
@@ -1577,13 +1724,13 @@ function TableView({
                     type="button"
                     onClick={unselect_all_columns}
                     disabled={is_unselect_all_state()}
-                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#2a2a2a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-[#4a4a4a] hover:text-white hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50"
+                    className="px-2 py-1 text-[11px] font-medium rounded-md border border-[#2a2a2a] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none text-[#4a4a4a] hover:text-white hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50"
                   >
                     Unselect all
                   </button>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-1.5">
               {column_order.filter((idx) => {
                 const col_name = table_data.columns[idx];
                 return col_name && col_name.trim() !== "";
@@ -1608,7 +1755,7 @@ function TableView({
                       toggle_column_visibility(column_idx);
                     }
                   }}
-                  className={`flex-none inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all cursor-move ${
+                  className={`flex-none inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition-all cursor-move ${
                     is_dragged
                       ? "opacity-50 bg-[#1f1f1f] border-[#3ECF8E]"
                       : is_drag_over
@@ -1620,15 +1767,15 @@ function TableView({
                       : "bg-[#0f0f0f] border-[#2a2a2a] opacity-50"
                   }`}
                 >
-                  <GripVertical className="w-3 h-3 text-[#4a4a4a] flex-shrink-0" />
+                  <GripVertical className="w-2.5 h-2.5 text-[#4a4a4a] flex-shrink-0" />
                   <span
-                    className={`text-sm ${
+                    className={`text-[11px] ${
                       is_visible ? "text-white" : "text-[#4a4a4a] line-through"
                     }`}
                   >
                     {column_name || `Column ${column_idx + 1}`}
                   </span>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-0.5">
                       <div className="relative" data-color-picker>
                         <button
                           onClick={(e) => {
@@ -1640,22 +1787,22 @@ function TableView({
                         >
                           {column_colors[column_idx] ? (
                             <div
-                              className="w-3.5 h-3.5 rounded"
+                              className="w-3 h-3 rounded"
                               style={{ backgroundColor: column_colors[column_idx] }}
                             />
                           ) : (
-                            <Palette className="w-3.5 h-3.5 text-[#4a4a4a]" />
+                            <Palette className="w-3 h-3 text-[#4a4a4a]" />
                           )}
                         </button>
                         {color_picker_open === column_idx && (
-                          <div className="absolute top-full right-0 mt-1 bg-[#1f1f1f] border border-[#2a2a2a] rounded-lg p-2 shadow-lg z-50" data-color-picker>
-                          <div className="flex flex-wrap gap-2 w-48">
+                          <div className="absolute top-full right-0 mt-1 bg-[#1f1f1f] border border-[#2a2a2a] rounded-md p-1.5 shadow-lg z-50" data-color-picker>
+                          <div className="flex flex-wrap gap-1.5 w-44">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 set_column_color(column_idx, "");
                               }}
-                              className={`w-8 h-8 rounded border-2 transition-all ${
+                              className={`w-6 h-6 rounded border-2 transition-all ${
                                 !column_colors[column_idx]
                                   ? "border-[#3ECF8E]"
                                   : "border-[#2a2a2a] hover:border-[#3ECF8E]/50"
@@ -1671,7 +1818,7 @@ function TableView({
                                   e.stopPropagation();
                                   set_column_color(column_idx, color.value);
                                 }}
-                                className={`w-8 h-8 rounded border-2 transition-all ${
+                                className={`w-6 h-6 rounded border-2 transition-all ${
                                   column_colors[column_idx] === color.value
                                     ? "border-[#3ECF8E] scale-110"
                                     : "border-[#2a2a2a] hover:border-[#3ECF8E]/50"
@@ -1692,9 +1839,9 @@ function TableView({
                       className="p-0.5 hover:bg-[#1f1f1f] rounded transition-colors"
                     >
                       {is_visible ? (
-                        <Eye className="w-3.5 h-3.5 text-[#3ECF8E]" />
+                        <Eye className="w-3 h-3 text-[#3ECF8E]" />
                       ) : (
-                        <EyeOff className="w-3.5 h-3.5 text-[#4a4a4a]" />
+                        <EyeOff className="w-3 h-3 text-[#4a4a4a]" />
                       )}
                     </button>
                   </div>
