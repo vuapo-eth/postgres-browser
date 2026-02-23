@@ -13,6 +13,30 @@ type TableData = {
   query?: string;
 };
 
+type WhereCondition = {
+  id: string;
+  column: string;
+  operator: string;
+  value: string;
+};
+
+type WhereItem =
+  | { type: "condition"; id: string; column: string; operator: string; value: string }
+  | {
+      type: "group";
+      id: string;
+      connector: "AND" | "OR" | null;
+      combine: "AND" | "OR";
+      children: WhereItem[];
+    };
+
+type WhereGroup = {
+  id: string;
+  connector: "AND" | "OR" | null;
+  combine: "AND" | "OR";
+  conditions: WhereCondition[];
+};
+
 export default function Home() {
   const router = useRouter();
   const [postgres_url, set_postgres_url] = useState("");
@@ -28,13 +52,7 @@ export default function Home() {
   const has_auto_connected_ref = useRef(false);
   const [sort_column, set_sort_column] = useState<string | null>(null);
   const [sort_direction, set_sort_direction] = useState<"asc" | "desc">("asc");
-  const [where_conditions, set_where_conditions] = useState<Array<{
-    id: string;
-    column: string;
-    operator: string;
-    value: string;
-    logical_op?: "AND" | "OR";
-  }>>([]);
+  const [where_items, set_where_items] = useState<WhereItem[]>([]);
 
   useEffect(() => {
     const stored = localStorage.getItem("starred_tables");
@@ -82,7 +100,7 @@ export default function Home() {
       const page_num = page_from_url ? parseInt(page_from_url, 10) : current_page;
       const page_to_load = !isNaN(page_num) && page_num > 0 ? page_num : current_page;
       
-      const where_clause = where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined;
+      const where_clause = where_items.length > 0 ? build_where_clause(where_items) : undefined;
       load_table_data(selected_table, page_to_load, sort_column, sort_direction, where_clause);
       if (page_to_load !== current_page) {
         set_current_page(page_to_load);
@@ -139,13 +157,13 @@ export default function Home() {
     set_current_page(1);
     set_sort_column(null);
     set_sort_direction("asc");
-    set_where_conditions([]);
+    set_where_items([]);
     router.push({ query: { ...router.query, table: table_name, page: "1" } }, undefined, { shallow: true });
     await load_table_data(table_name, 1, null, "asc");
   };
 
   const handle_sort = async (column_name: string, force_direction?: "asc" | "desc") => {
-    const where_clause = where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined;
+    const where_clause = where_items.length > 0 ? build_where_clause(where_items) : undefined;
     if (force_direction) {
       set_sort_column(column_name);
       set_sort_direction(force_direction);
@@ -174,57 +192,88 @@ export default function Home() {
     router.push("/", undefined, { shallow: true });
   };
 
-  const build_where_clause = (conditions: Array<{
-    id: string;
-    column: string;
-    operator: string;
-    value: string;
-    logical_op?: "AND" | "OR";
-  }>): string => {
-    if (conditions.length === 0) return "";
-    
-    return conditions.map((cond: { id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }, idx: number) => {
-      const column_escaped = `"${cond.column.replace(/"/g, '""')}"`;
-      const logical_op = idx > 0 ? ` ${cond.logical_op || "AND"} ` : "";
-      
-      if (cond.operator.includes("NULL")) {
-        return `${logical_op}${column_escaped} ${cond.operator}`;
-      } else if (cond.operator === "IN" || cond.operator === "NOT IN") {
-        const values = cond.value.split(",").map((v: string) => v.trim()).filter((v: string) => v);
-        const values_str = values.map((v: string) => `'${v.replace(/'/g, "''")}'`).join(", ");
-        return `${logical_op}${column_escaped} ${cond.operator} (${values_str})`;
-      } else if (cond.operator === "CONTAINS") {
-        const value_escaped = `'%${cond.value.replace(/'/g, "''")}%'`;
-        return `${logical_op}${column_escaped} LIKE ${value_escaped}`;
-      } else if (cond.operator === "CONTAINS (case-insensitive)") {
-        const value_escaped = `'%${cond.value.replace(/'/g, "''")}%'`;
-        return `${logical_op}${column_escaped} ILIKE ${value_escaped}`;
-      } else {
-        const value_escaped = `'${cond.value.replace(/'/g, "''")}'`;
-        return `${logical_op}${column_escaped} ${cond.operator} ${value_escaped}`;
-      }
+  const condition_to_sql = (cond: WhereCondition): string => {
+    const column_escaped = `"${cond.column.replace(/"/g, '""')}"`;
+    if (cond.operator.includes("NULL")) {
+      return `${column_escaped} ${cond.operator}`;
+    }
+    if (cond.operator === "IN" || cond.operator === "NOT IN") {
+      const values = cond.value.split(",").map((v: string) => v.trim()).filter((v: string) => v);
+      const values_str = values.map((v: string) => `'${v.replace(/'/g, "''")}'`).join(", ");
+      return `${column_escaped} ${cond.operator} (${values_str})`;
+    }
+    if (cond.operator === "CONTAINS") {
+      const value_escaped = `'%${cond.value.replace(/'/g, "''")}%'`;
+      return `${column_escaped} LIKE ${value_escaped}`;
+    }
+    if (cond.operator === "CONTAINS (case-insensitive)") {
+      const value_escaped = `'%${cond.value.replace(/'/g, "''")}%'`;
+      return `${column_escaped} ILIKE ${value_escaped}`;
+    }
+    const value_escaped = `'${cond.value.replace(/'/g, "''")}'`;
+    return `${column_escaped} ${cond.operator} ${value_escaped}`;
+  };
+
+  const item_to_sql = (item: WhereItem): string => {
+    if (item.type === "condition") return condition_to_sql(item);
+    const part = item.children.map(item_to_sql).filter(Boolean).join(` ${item.combine} `);
+    return item.children.length > 1 ? `(${part})` : part;
+  };
+
+  const build_where_clause = (items: WhereItem[]): string => {
+    const non_empty = items.filter((it) => it.type === "condition" || (it.type === "group" && it.children.length > 0));
+    if (non_empty.length === 0) return "";
+    return non_empty.map((item, idx) => {
+      const sql = item_to_sql(item);
+      const connector = idx > 0 && item.type === "group" && item.connector ? ` ${item.connector} ` : "";
+      return connector + sql;
     }).join("");
   };
 
-  const save_query_to_history = (table_name: string, query: string, where_conditions: Array<{
-    id: string;
-    column: string;
-    operator: string;
-    value: string;
-    logical_op?: "AND" | "OR";
-  }>, sort_column: string | null, sort_direction: "asc" | "desc") => {
+  const groups_to_items = (groups: WhereGroup[]): WhereItem[] =>
+    groups.map((g) => ({
+      type: "group" as const,
+      id: g.id,
+      connector: g.connector,
+      combine: g.combine,
+      children: g.conditions.map((c) => ({ type: "condition" as const, ...c })),
+    }));
+
+  const items_to_groups = (items: WhereItem[]): WhereGroup[] =>
+    items.filter((it): it is Extract<WhereItem, { type: "group" }> => it.type === "group").map((g) => ({
+      id: g.id,
+      connector: g.connector,
+      combine: g.combine,
+      conditions: g.children.filter((c): c is Extract<WhereItem, { type: "condition" }> => c.type === "condition").map(({ id, column, operator, value }) => ({ id, column, operator, value })),
+    }));
+
+  const apply_update_at_path = (items: WhereItem[], path: number[], replace: (item: WhereItem) => WhereItem): WhereItem[] => {
+    if (path.length === 0) return items;
+    const [i, ...rest] = path;
+    if (i < 0 || i >= items.length) return items;
+    if (rest.length === 0) {
+      const next = [...items];
+      next[i] = replace(items[i]);
+      return next;
+    }
+    const item = items[i];
+    if (item.type !== "group") return items;
+    const next_children = apply_update_at_path(item.children, rest, replace);
+    return [...items.slice(0, i), { ...item, children: next_children }, ...items.slice(i + 1)];
+  };
+
+  const count_conditions_in_items = (items: WhereItem[]): number =>
+    items.reduce((n, it) => n + (it.type === "condition" ? 1 : count_conditions_in_items(it.children)), 0);
+
+  const save_query_to_history = (table_name: string, query: string, where_items: WhereItem[], sort_column: string | null, sort_direction: "asc" | "desc") => {
     try {
       const history_key = `sql_query_history_${table_name}`;
       const existing_history = localStorage.getItem(history_key);
       const history: Array<{
         query: string;
-        where_conditions: Array<{
-          id: string;
-          column: string;
-          operator: string;
-          value: string;
-          logical_op?: "AND" | "OR";
-        }>;
+        where_items?: WhereItem[];
+        where_groups?: WhereGroup[];
+        where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }>;
         sort_column: string | null;
         sort_direction: "asc" | "desc";
         timestamp: number;
@@ -232,7 +281,7 @@ export default function Home() {
 
       const new_entry = {
         query,
-        where_conditions: JSON.parse(JSON.stringify(where_conditions)),
+        where_items: JSON.parse(JSON.stringify(where_items)),
         sort_column,
         sort_direction,
         timestamp: Date.now(),
@@ -250,15 +299,21 @@ export default function Home() {
     }
   };
 
+  const flat_to_items = (flat: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }>): WhereItem[] => {
+    if (!flat || flat.length === 0) return [];
+    return groups_to_items([{
+      id: Date.now().toString(),
+      connector: null,
+      combine: "AND",
+      conditions: flat.map(({ id, column, operator, value }) => ({ id, column, operator, value })),
+    }]);
+  };
+
   const get_query_history = (table_name: string): Array<{
     query: string;
-    where_conditions: Array<{
-      id: string;
-      column: string;
-      operator: string;
-      value: string;
-      logical_op?: "AND" | "OR";
-    }>;
+    where_items?: WhereItem[];
+    where_groups?: WhereGroup[];
+    where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }>;
     sort_column: string | null;
     sort_direction: "asc" | "desc";
     timestamp: number;
@@ -279,7 +334,7 @@ export default function Home() {
     try {
       const final_sort_col = sort_col !== undefined ? sort_col : sort_column;
       const final_sort_dir = sort_dir !== undefined ? sort_dir : sort_direction;
-      const final_where_clause = where_clause !== undefined ? where_clause : (where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined);
+      const final_where_clause = where_clause !== undefined ? where_clause : (where_items.length > 0 ? build_where_clause(where_items) : undefined);
 
       const response = await fetch("/api/table-data", {
         method: "POST",
@@ -304,7 +359,7 @@ export default function Home() {
       set_table_data(data);
 
       if (data.query) {
-        save_query_to_history(table_name, data.query, where_conditions, final_sort_col, final_sort_dir);
+        save_query_to_history(table_name, data.query, where_items, final_sort_col, final_sort_dir);
       }
     } catch (err: any) {
       set_error(err.message || "Failed to load table data");
@@ -316,7 +371,7 @@ export default function Home() {
   const run_custom_sql = async (sql: string) => {
     set_is_loading(true);
     set_error(null);
-    set_where_conditions([]);
+    set_where_items([]);
     try {
       const response = await fetch("/api/run-sql", {
         method: "POST",
@@ -403,9 +458,12 @@ export default function Home() {
                     sort_column={sort_column}
                     sort_direction={sort_direction}
                     on_sort={handle_sort}
-                    where_conditions={where_conditions}
-                    set_where_conditions={set_where_conditions}
+                    where_items={where_items}
+                    set_where_items={set_where_items}
                     build_where_clause={build_where_clause}
+                    apply_update_at_path={apply_update_at_path}
+                    entry_to_items={(entry: { where_items?: WhereItem[]; where_groups?: WhereGroup[]; where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }> }) => entry.where_items ?? (entry.where_groups?.length ? groups_to_items(entry.where_groups) : flat_to_items(entry.where_conditions ?? []))}
+                    count_conditions_in_items={count_conditions_in_items}
                     selected_table={selected_table}
                     load_table_data={load_table_data}
                     run_custom_sql={run_custom_sql}
@@ -414,7 +472,7 @@ export default function Home() {
                     set_sort_direction={set_sort_direction}
                     on_cell_update={() => {
                       if (selected_table) {
-                        const where_clause = where_conditions.length > 0 ? build_where_clause(where_conditions) : undefined;
+                        const where_clause = where_items.length > 0 ? build_where_clause(where_items) : undefined;
                         load_table_data(selected_table, current_page, sort_column, sort_direction, where_clause);
                       }
                     }}
@@ -657,6 +715,173 @@ function TablesList({
   );
 }
 
+function get_operator_style(operator: string): { backgroundColor: string; borderColor: string } {
+  if (operator === "=") return { backgroundColor: "rgba(62, 207, 142, 0.25)", borderColor: "#3ECF8E" };
+  if (operator === "!=") return { backgroundColor: "rgba(239, 68, 68, 0.2)", borderColor: "#EF4444" };
+  if ([">", "<", ">=", "<="].includes(operator)) return { backgroundColor: "rgba(59, 130, 246, 0.22)", borderColor: "#3B82F6" };
+  if (["LIKE", "ILIKE", "CONTAINS", "CONTAINS (case-insensitive)"].includes(operator)) return { backgroundColor: "rgba(139, 92, 246, 0.22)", borderColor: "#8B5CF6" };
+  if (["IN", "NOT IN"].includes(operator)) return { backgroundColor: "rgba(245, 158, 11, 0.22)", borderColor: "#F59E0B" };
+  if (operator.includes("NULL")) return { backgroundColor: "rgba(107, 114, 128, 0.25)", borderColor: "#6B7280" };
+  return { backgroundColor: "rgba(0,0,0,0.2)", borderColor: "#2a2a2a" };
+}
+
+function get_item_at_path(root: WhereItem[], path: number[]): WhereItem | undefined {
+  if (path.length === 0) return undefined;
+  const [i, ...rest] = path;
+  if (i < 0 || i >= root.length) return undefined;
+  const item = root[i];
+  if (rest.length === 0) return item;
+  return item.type === "group" ? get_item_at_path(item.children, rest) : undefined;
+}
+
+function WhereBlocksRecursive({
+  items,
+  path,
+  set_where_items,
+  apply_update_at_path,
+  table_data,
+  first_column,
+  selected_table,
+  sort_column,
+  sort_direction,
+  load_table_data,
+  handle_page_change,
+  build_where_clause,
+}: {
+  items: WhereItem[];
+  path: number[];
+  set_where_items: React.Dispatch<React.SetStateAction<WhereItem[]>>;
+  apply_update_at_path: (items: WhereItem[], path: number[], replace: (item: WhereItem) => WhereItem) => WhereItem[];
+  table_data: TableData;
+  first_column: string;
+  selected_table: string | null;
+  sort_column: string | null;
+  sort_direction: "asc" | "desc";
+  load_table_data: (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc", where_clause?: string) => Promise<void>;
+  handle_page_change: (page: number) => void;
+  build_where_clause: (items: WhereItem[]) => string;
+}) {
+  const at_root = path.length === 0;
+  const update_at = (p: number[], replace: (item: WhereItem) => WhereItem) => set_where_items((prev) => apply_update_at_path(prev, p, replace));
+
+  if (at_root) {
+    return (
+      <div className="flex flex-wrap items-start gap-2">
+        {items.map((item, idx) => (
+          <div key={item.id} className="flex flex-wrap items-center gap-2">
+            {idx > 0 && item.type === "group" && (
+              <select
+                value={item.connector ?? "AND"}
+                onChange={(e) => update_at([idx], (g) => g.type === "group" ? { ...g, connector: e.target.value as "AND" | "OR" } : g)}
+                className="px-2 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#3ECF8E] text-xs font-semibold"
+              >
+                <option value="AND">AND</option>
+                <option value="OR">OR</option>
+              </select>
+            )}
+            <WhereBlocksRecursive
+              items={items}
+              path={[idx]}
+              set_where_items={set_where_items}
+              apply_update_at_path={apply_update_at_path}
+              table_data={table_data}
+              first_column={first_column}
+              selected_table={selected_table}
+              sort_column={sort_column}
+              sort_direction={sort_direction}
+              load_table_data={load_table_data}
+              handle_page_change={handle_page_change}
+              build_where_clause={build_where_clause}
+            />
+          </div>
+        ))}
+        <button
+          onClick={() => set_where_items((prev) => [...prev, { type: "group", id: Date.now().toString(), connector: items.length > 0 ? "AND" : null, combine: "AND", children: [{ type: "condition", id: (Date.now() + 1).toString(), column: first_column, operator: "=", value: "" }] }])}
+          className="flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1a1a1a] border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] transition-all text-xs min-h-[44px]"
+        >
+          <span className="text-lg leading-none">+</span>
+          <span>Add group</span>
+        </button>
+        {items.length > 0 && (
+          <button
+            onClick={async () => {
+              if (selected_table) {
+                const where_clause = build_where_clause(items);
+                handle_page_change(1);
+                await load_table_data(selected_table, 1, sort_column, sort_direction, where_clause);
+              }
+            }}
+            className="px-4 py-2 bg-[#3ECF8E] hover:bg-[#24B47E] text-black font-semibold rounded-lg transition-all text-xs w-fit"
+          >
+            Apply Filters
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const item = get_item_at_path(items, path);
+  if (!item) return null;
+
+  if (item.type === "condition") {
+    const op_style = get_operator_style(item.operator);
+    return (
+      <div className="flex items-stretch rounded-lg overflow-hidden border-2 min-w-0" style={{ backgroundColor: op_style.backgroundColor, borderColor: op_style.borderColor }}>
+        <div className="flex items-center gap-1.5 flex-wrap px-2 py-1.5 min-w-0 border-r shrink-0" style={{ borderColor: op_style.borderColor }}>
+          <select value={item.column} onChange={(e) => update_at(path, (c) => ({ ...c, column: e.target.value }))} className="px-2 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs font-medium max-w-[100px]">
+            {table_data.columns.filter(col => col && col.trim() !== "").map((col) => <option key={col} value={col}>{col}</option>)}
+          </select>
+          <select value={item.operator} onChange={(e) => update_at(path, (c) => ({ ...c, operator: e.target.value }))} className="px-1.5 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-[#3ECF8E] text-xs font-semibold w-[3.25rem] shrink-0">
+            <option value="=">=</option><option value="!=">!=</option><option value=">">&gt;</option><option value="<">&lt;</option><option value=">=">&gt;=</option><option value="<=">&lt;=</option>
+            <option value="CONTAINS">Contains</option><option value="CONTAINS (case-insensitive)">Contains (case-insensitive)</option><option value="LIKE">LIKE</option><option value="ILIKE">ILIKE</option>
+            <option value="IN">IN</option><option value="NOT IN">NOT IN</option><option value="IS NULL">IS NULL</option><option value="IS NOT NULL">IS NOT NULL</option>
+          </select>
+        </div>
+        <div className="flex-1 flex items-center min-w-0">
+          {!item.operator.includes("NULL") ? (
+            <input type="text" value={item.value} onChange={(e) => update_at(path, (c) => ({ ...c, value: e.target.value }))} placeholder="value" className="w-full h-full px-2 py-1.5 bg-transparent text-white text-xs font-mono placeholder:text-[#4a4a4a] focus:outline-none focus:ring-0 border-0 min-w-0" style={{ fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }} />
+          ) : (
+            <span className="px-2 py-1.5 text-xs text-[#8b8b8b] font-mono">NULL</span>
+          )}
+        </div>
+        <button onClick={() => set_where_items((prev) => apply_update_at_path(prev, path.slice(0, -1), (parent) => parent.type === "group" ? { ...parent, children: parent.children.filter((_, j) => j !== path[path.length - 1]) } : parent))} className="p-1.5 hover:bg-[#1f1f1f] rounded-r transition-colors self-center shrink-0">
+          <X className="w-3 h-3 text-[#8b8b8b] hover:text-[#EF4444]" />
+        </button>
+      </div>
+    );
+  }
+
+  const group = item;
+  const parent_path = path.slice(0, -1);
+  const group_idx = path[path.length - 1];
+  return (
+    <div className="rounded-lg border border-[#2a2a2a] p-2 bg-[#1a1a1a]">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[#8b8b8b] text-xs">within group:</span>
+        <select value={group.combine} onChange={(e) => update_at(path, (g) => ({ ...g, combine: e.target.value as "AND" | "OR" }))} className="px-2 py-1 bg-[#0f0f0f] border border-[#2a2a2a] rounded text-xs font-medium" style={{ color: group.combine === "AND" ? "#3ECF8E" : "#3B82F6" }}>
+          <option value="AND">AND</option><option value="OR">OR</option>
+        </select>
+      </div>
+      <div className="flex flex-wrap items-start gap-2">
+        {group.children.map((_, child_idx) => (
+          <WhereBlocksRecursive key={get_item_at_path(items, path.concat(child_idx))?.id} items={items} path={path.concat(child_idx)} set_where_items={set_where_items} apply_update_at_path={apply_update_at_path} table_data={table_data} first_column={first_column} selected_table={selected_table} sort_column={sort_column} sort_direction={sort_direction} load_table_data={load_table_data} handle_page_change={handle_page_change} build_where_clause={build_where_clause} />
+        ))}
+        <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "condition", id: Date.now().toString(), column: first_column, operator: "=", value: "" }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
+          + condition
+        </button>
+        <button onClick={() => update_at(path, (it) => it.type === "group" ? { ...it, children: [...it.children, { type: "group", id: Date.now().toString(), connector: it.children.length > 0 ? "AND" : null, combine: "AND", children: [{ type: "condition", id: (Date.now() + 1).toString(), column: first_column, operator: "=", value: "" }] }] } : it)} className="flex items-center justify-center gap-1 px-2 py-2 border border-dashed border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:border-[#3ECF8E]/50 hover:text-[#3ECF8E] text-xs min-h-[40px]" style={{ backgroundColor: "rgba(0,0,0,0.2)" }}>
+          + group
+        </button>
+      </div>
+      {group.children.length > 0 && (
+        <button onClick={() => set_where_items((prev) => parent_path.length === 0 ? prev.filter((_, i) => i !== group_idx).map((g, i) => i === 0 && g.type === "group" ? { ...g, connector: null } : g) : apply_update_at_path(prev, parent_path, (p) => p.type === "group" ? { ...p, children: p.children.filter((_, j) => j !== group_idx) } : p))} className="mt-2 text-xs text-[#8b8b8b] hover:text-[#EF4444]">
+          Remove group
+        </button>
+      )}
+    </div>
+  );
+}
+
 function TableView({
   table_name,
   table_data,
@@ -669,9 +894,12 @@ function TableView({
   sort_direction,
   on_sort,
   on_cell_update,
-  where_conditions,
-  set_where_conditions,
+  where_items,
+  set_where_items,
   build_where_clause,
+  apply_update_at_path,
+  entry_to_items,
+  count_conditions_in_items,
   selected_table,
   load_table_data,
   run_custom_sql,
@@ -690,33 +918,20 @@ function TableView({
   sort_direction: "asc" | "desc";
   on_sort: (column_name: string, force_direction?: "asc" | "desc") => void;
   on_cell_update: () => void;
-  where_conditions: Array<{
-    id: string;
-    column: string;
-    operator: string;
-    value: string;
-    logical_op?: "AND" | "OR";
-  }>;
-  set_where_conditions: React.Dispatch<React.SetStateAction<Array<{
-    id: string;
-    column: string;
-    operator: string;
-    value: string;
-    logical_op?: "AND" | "OR";
-  }>>>;
-  build_where_clause: (conditions: typeof where_conditions) => string;
+  where_items: WhereItem[];
+  set_where_items: React.Dispatch<React.SetStateAction<WhereItem[]>>;
+  build_where_clause: (items: WhereItem[]) => string;
+  apply_update_at_path: (items: WhereItem[], path: number[], replace: (item: WhereItem) => WhereItem) => WhereItem[];
+  entry_to_items: (entry: { where_items?: WhereItem[]; where_groups?: WhereGroup[]; where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }> }) => WhereItem[];
+  count_conditions_in_items: (items: WhereItem[]) => number;
   selected_table: string | null;
   load_table_data: (table_name: string, page: number, sort_col?: string | null, sort_dir?: "asc" | "desc", where_clause?: string) => Promise<void>;
   run_custom_sql: (sql: string) => Promise<void>;
   get_query_history: (table_name: string) => Array<{
     query: string;
-    where_conditions: Array<{
-      id: string;
-      column: string;
-      operator: string;
-      value: string;
-      logical_op?: "AND" | "OR";
-    }>;
+    where_items?: WhereItem[];
+    where_groups?: WhereGroup[];
+    where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }>;
     sort_column: string | null;
     sort_direction: "asc" | "desc";
     timestamp: number;
@@ -1267,13 +1482,8 @@ function TableView({
 
   const restore_query_from_history = async (history_entry: {
     query: string;
-    where_conditions: Array<{
-      id: string;
-      column: string;
-      operator: string;
-      value: string;
-      logical_op?: "AND" | "OR";
-    }>;
+    where_groups?: WhereGroup[];
+    where_conditions?: Array<{ id: string; column: string; operator: string; value: string; logical_op?: "AND" | "OR" }>;
     sort_column: string | null;
     sort_direction: "asc" | "desc";
     timestamp: number;
@@ -1282,9 +1492,10 @@ function TableView({
 
     set_sort_column(history_entry.sort_column);
     set_sort_direction(history_entry.sort_direction);
-    set_where_conditions(JSON.parse(JSON.stringify(history_entry.where_conditions)));
+    const items = entry_to_items(history_entry);
+    set_where_items(JSON.parse(JSON.stringify(items)));
 
-    const where_clause = history_entry.where_conditions.length > 0 ? build_where_clause(history_entry.where_conditions) : undefined;
+    const where_clause = items.length > 0 ? build_where_clause(items) : undefined;
     handle_page_change(1);
     await load_table_data(selected_table, 1, history_entry.sort_column, history_entry.sort_direction, where_clause);
     set_is_history_open(false);
@@ -1461,9 +1672,9 @@ function TableView({
                                           Sort: {entry.sort_column} {entry.sort_direction}
                                         </span>
                                       )}
-                                      {entry.where_conditions && entry.where_conditions.length > 0 && (
+                                      {(entry.where_items ? count_conditions_in_items(entry.where_items) : (entry.where_groups?.reduce((s, g) => s + g.conditions.length, 0) ?? entry.where_conditions?.length ?? 0)) > 0 && (
                                         <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
-                                          {entry.where_conditions.length} filter{entry.where_conditions.length !== 1 ? "s" : ""}
+                                          {entry.where_items ? count_conditions_in_items(entry.where_items) : (entry.where_groups?.reduce((s, g) => s + g.conditions.length, 0) ?? entry.where_conditions?.length ?? 0)} filter{(entry.where_items ? count_conditions_in_items(entry.where_items) : (entry.where_groups?.reduce((s, g) => s + g.conditions.length, 0) ?? entry.where_conditions?.length ?? 0)) !== 1 ? "s" : ""}
                                         </span>
                                       )}
                                     </div>
@@ -1527,10 +1738,10 @@ function TableView({
                 <button
                   onClick={() => run_custom_sql(editable_sql)}
                   disabled={!editable_sql.trim()}
-                  className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#3ECF8E] text-black hover:bg-[#24B47E] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                  className="flex-shrink-0 p-2 rounded-lg text-xs font-medium bg-[#3ECF8E] text-black hover:bg-[#24B47E] disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Run query"
                 >
                   <Play className="w-3.5 h-3.5" />
-                  Run
                 </button>
               </div>
               <div
@@ -1555,6 +1766,77 @@ function TableView({
           <div className="relative">
             <div className="w-full min-h-12 px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg relative">
               <div className="absolute top-2 right-2 flex items-center gap-2 flex-nowrap flex-shrink-0 z-10">
+                <div className="relative flex-shrink-0" data-history-dropdown>
+                  <button
+                    onClick={() => set_is_history_open(!is_history_open)}
+                    className="flex items-center gap-2 flex-shrink-0 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs whitespace-nowrap"
+                  >
+                    <History className="w-3.5 h-3.5" />
+                    <span>History</span>
+                    {query_history.length > 0 && (
+                      <span className="px-1.5 py-0.5 bg-[#3ECF8E] text-black text-xs rounded-full font-semibold">
+                        {query_history.length}
+                      </span>
+                    )}
+                  </button>
+                  {is_history_open && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-40"
+                        onClick={() => set_is_history_open(false)}
+                      />
+                      <div className="absolute right-0 top-full mt-2 w-96 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg shadow-lg z-50 max-h-[400px] overflow-y-auto" data-history-dropdown>
+                        <div className="p-3 border-b border-[#2a2a2a] flex items-center justify-between">
+                          <h3 className="text-sm font-semibold text-white">Query History</h3>
+                          <button
+                            onClick={() => set_is_history_open(false)}
+                            className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
+                          >
+                            <X className="w-4 h-4 text-[#8b8b8b]" />
+                          </button>
+                        </div>
+                        {query_history.length === 0 ? (
+                          <div className="p-4 text-center text-sm text-[#4a4a4a]">
+                            No query history
+                          </div>
+                        ) : (
+                          <div className="divide-y divide-[#2a2a2a]">
+                            {query_history.map((entry, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => restore_query_from_history(entry)}
+                                className="w-full p-3 text-left hover:bg-[#1f1f1f] transition-colors group"
+                              >
+                                <div className="flex items-start justify-between gap-2 mb-1">
+                                  <div className="flex-1 min-w-0">
+                                    <div className="font-mono text-xs text-white truncate mb-1">
+                                      {entry.query.length > 80 ? `${entry.query.substring(0, 80)}...` : entry.query}
+                                    </div>
+                                    <div className="flex items-center gap-2 text-xs text-[#4a4a4a]">
+                                      {entry.sort_column && (
+                                        <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
+                                          Sort: {entry.sort_column} {entry.sort_direction}
+                                        </span>
+                                      )}
+                                      {(entry.where_items ? count_conditions_in_items(entry.where_items) : (entry.where_groups?.reduce((s, g) => s + g.conditions.length, 0) ?? entry.where_conditions?.length ?? 0)) > 0 && (
+                                        <span className="px-1.5 py-0.5 bg-[#0f0f0f] rounded">
+                                          {entry.where_items ? count_conditions_in_items(entry.where_items) : (entry.where_groups?.reduce((s, g) => s + g.conditions.length, 0) ?? entry.where_conditions?.length ?? 0)} filter{(entry.where_items ? count_conditions_in_items(entry.where_items) : (entry.where_groups?.reduce((s, g) => s + g.conditions.length, 0) ?? entry.where_conditions?.length ?? 0)) !== 1 ? "s" : ""}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="text-xs text-[#4a4a4a] whitespace-nowrap">
+                                    {format_timestamp(entry.timestamp)}
+                                  </div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
                 <button
                   onClick={() => set_is_ai_modal_open(true)}
                   className="flex items-center gap-2 flex-shrink-0 px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all text-xs whitespace-nowrap"
@@ -1584,124 +1866,45 @@ function TableView({
                   <Blocks className="w-3.5 h-3.5" />
                   Blocks
                 </button>
+                <button
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(editable_sql);
+                    set_is_sql_copied(true);
+                    setTimeout(() => set_is_sql_copied(false), 2000);
+                  }}
+                  className="flex-shrink-0 p-2 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all"
+                  title="Copy SQL to clipboard"
+                >
+                  {is_sql_copied ? (
+                    <Check className="w-3.5 h-3.5 text-[#3ECF8E]" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                </button>
+                <button
+                  onClick={() => run_custom_sql(editable_sql)}
+                  disabled={!editable_sql.trim()}
+                  className="flex-shrink-0 p-2 rounded-lg text-xs font-medium bg-[#3ECF8E] text-black hover:bg-[#24B47E] disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Run query"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                </button>
               </div>
               <div className="text-xs text-[#8b8b8b] mb-2 pr-52">WHERE</div>
-              <div className="flex flex-col gap-2">
-                {where_conditions.length === 0 ? (
-                  <div className="text-xs text-[#4a4a4a] italic py-2">No conditions added</div>
-                ) : (
-                  where_conditions.map((condition, idx) => (
-                    <div key={condition.id} className="flex items-center gap-2 flex-wrap">
-                      {idx > 0 && (
-                        <select
-                          value={condition.logical_op || "AND"}
-                          onChange={(e) => {
-                            const new_conditions = [...where_conditions];
-                            new_conditions[idx].logical_op = e.target.value as "AND" | "OR";
-                            set_where_conditions(new_conditions);
-                          }}
-                          className="px-2 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs"
-                        >
-                          <option value="AND">AND</option>
-                          <option value="OR">OR</option>
-                        </select>
-                      )}
-                      <select
-                        value={condition.column}
-                        onChange={(e) => {
-                          const new_conditions = [...where_conditions];
-                          new_conditions[idx].column = e.target.value;
-                          set_where_conditions(new_conditions);
-                        }}
-                        className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs"
-                      >
-                        {table_data.columns.filter(col => col && col.trim() !== "").map((col) => (
-                          <option key={col} value={col}>{col}</option>
-                        ))}
-                      </select>
-                      <select
-                        value={condition.operator}
-                        onChange={(e) => {
-                          const new_conditions = [...where_conditions];
-                          new_conditions[idx].operator = e.target.value;
-                          set_where_conditions(new_conditions);
-                        }}
-                        className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs"
-                      >
-                        <option value="=">=</option>
-                        <option value="!=">!=</option>
-                        <option value=">">&gt;</option>
-                        <option value="<">&lt;</option>
-                        <option value=">=">&gt;=</option>
-                        <option value="<=">&lt;=</option>
-                        <option value="CONTAINS">Contains</option>
-                        <option value="CONTAINS (case-insensitive)">Contains (case-insensitive)</option>
-                        <option value="LIKE">LIKE</option>
-                        <option value="ILIKE">ILIKE</option>
-                        <option value="IN">IN</option>
-                        <option value="NOT IN">NOT IN</option>
-                        <option value="IS NULL">IS NULL</option>
-                        <option value="IS NOT NULL">IS NOT NULL</option>
-                      </select>
-                      {!condition.operator.includes("NULL") && (
-                        <input
-                          type="text"
-                          value={condition.value}
-                          onChange={(e) => {
-                            const new_conditions = [...where_conditions];
-                            new_conditions[idx].value = e.target.value;
-                            set_where_conditions(new_conditions);
-                          }}
-                          placeholder="Value"
-                          className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs flex-1 min-w-[120px]"
-                        />
-                      )}
-                      <button
-                        onClick={() => {
-                          set_where_conditions(where_conditions.filter((_, i) => i !== idx));
-                        }}
-                        className="p-1.5 hover:bg-[#1f1f1f] rounded transition-colors"
-                      >
-                        <X className="w-3.5 h-3.5 text-[#8b8b8b] hover:text-[#EF4444]" />
-                      </button>
-                    </div>
-                  ))
-                )}
-                <div className="mt-2 flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      set_where_conditions([
-                        ...where_conditions,
-                        {
-                          id: Date.now().toString(),
-                          column: table_data.columns.find(col => col && col.trim() !== "") || "",
-                          operator: "=",
-                          value: "",
-                          logical_op: where_conditions.length > 0 ? "AND" : undefined,
-                        },
-                      ]);
-                    }}
-                    className="px-3 py-1.5 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-white text-xs hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50 transition-all flex items-center gap-1.5 w-fit"
-                  >
-                    <span>+</span>
-                    <span>Add Condition</span>
-                  </button>
-                  {where_conditions.length > 0 && (
-                    <button
-                      onClick={async () => {
-                        if (selected_table) {
-                          const where_clause = build_where_clause(where_conditions);
-                          handle_page_change(1);
-                          await load_table_data(selected_table, 1, sort_column, sort_direction, where_clause);
-                        }
-                      }}
-                      className="px-4 py-2 bg-[#3ECF8E] hover:bg-[#24B47E] text-black font-semibold rounded-lg transition-all text-xs w-fit"
-                    >
-                      Apply Filters
-                    </button>
-                  )}
-                </div>
-              </div>
+              <WhereBlocksRecursive
+                items={where_items}
+                path={[]}
+                set_where_items={set_where_items}
+                apply_update_at_path={apply_update_at_path}
+                table_data={table_data}
+                first_column={table_data.columns.find(col => col && col.trim() !== "") || ""}
+                selected_table={selected_table}
+                sort_column={sort_column}
+                sort_direction={sort_direction}
+                load_table_data={load_table_data}
+                handle_page_change={handle_page_change}
+                build_where_clause={build_where_clause}
+              />
             </div>
           </div>
         )}
