@@ -748,6 +748,7 @@ function TableView({
   const [ai_prompt, set_ai_prompt] = useState("");
   const [is_ai_generating, set_is_ai_generating] = useState(false);
   const [editable_sql, set_editable_sql] = useState(table_data.query || "");
+  const [is_sql_copied, set_is_sql_copied] = useState(false);
 
   useEffect(() => {
     set_editable_sql(table_data.query || "");
@@ -1507,6 +1508,21 @@ function TableView({
                 >
                   <Blocks className="w-3.5 h-3.5" />
                   Blocks
+                </button>
+                <button
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(editable_sql);
+                    set_is_sql_copied(true);
+                    setTimeout(() => set_is_sql_copied(false), 2000);
+                  }}
+                  className="flex-shrink-0 p-2 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-[#8b8b8b] hover:text-white hover:border-[#3ECF8E]/50 transition-all"
+                  title="Copy SQL to clipboard"
+                >
+                  {is_sql_copied ? (
+                    <Check className="w-3.5 h-3.5 text-[#3ECF8E]" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
                 </button>
                 <button
                   onClick={() => run_custom_sql(editable_sql)}
