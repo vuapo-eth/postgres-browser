@@ -37,6 +37,13 @@ type WhereGroup = {
   conditions: WhereCondition[];
 };
 
+type ParsedQuery = {
+  where_items: WhereItem[];
+  sort_column: string | null;
+  sort_direction: "asc" | "desc";
+  page: number;
+};
+
 export default function Home() {
   const router = useRouter();
   const [postgres_url, set_postgres_url] = useState("");
@@ -341,6 +348,103 @@ export default function Home() {
     }]);
   };
 
+  const parse_query = (sql: string, table_name: string): ParsedQuery | null => {
+    const q = sql.replace(/\s*;\s*$/, "").trim();
+    const from_match = q.match(/^SELECT\s+\*\s+FROM\s+"([^"]*(?:""[^"]*)*)"\s*([\s\S]*)$/i);
+    if (!from_match) return null;
+    const parsed_table = from_match[1].replace(/""/g, '"');
+    if (parsed_table !== table_name) return null;
+    let rest = from_match[2].trim();
+    let where_clause = "";
+    const where_match = rest.match(/^WHERE\s+([\s\S]+?)(?=\s+ORDER\s+BY\s+|\s+LIMIT\s+\d+\s+OFFSET\s+\d+\s*$)/i);
+    if (where_match) {
+      where_clause = where_match[1].trim();
+      rest = rest.slice(where_match[0].length).trim();
+    }
+    let sort_column: string | null = null;
+    let sort_direction: "asc" | "desc" = "asc";
+    const order_match = rest.match(/ORDER\s+BY\s+"([^"]*(?:""[^"]*)*)"\s+(ASC|DESC)/i);
+    if (order_match) {
+      sort_column = order_match[1].replace(/""/g, '"');
+      sort_direction = order_match[2].toUpperCase() === "DESC" ? "desc" : "asc";
+      rest = rest.slice(order_match[0].length).trim();
+    }
+    const limit_offset_match = rest.match(/LIMIT\s+(\d+)\s+OFFSET\s+(\d+)/i);
+    if (!limit_offset_match) return null;
+    const limit = parseInt(limit_offset_match[1], 10);
+    const offset = parseInt(limit_offset_match[2], 10);
+    const page = limit > 0 ? Math.floor(offset / limit) + 1 : 1;
+
+    const parse_where_to_items = (where_str: string): WhereItem[] => {
+      if (!where_str.trim()) return [];
+      const conditions: WhereItem[] = [];
+      const and_parts = where_str.split(/\s+AND\s+(?=(?:"[^"]*"|[^"()]*\))*$)/i);
+      for (const part of and_parts) {
+        const cond = parse_one_condition(part.trim());
+        if (cond) conditions.push(cond);
+      }
+      if (conditions.length === 0) return [];
+      return [{
+        type: "group",
+        id: Date.now().toString() + "_g",
+        connector: null,
+        combine: "AND",
+        children: conditions,
+      }];
+    };
+
+    const gen_id = () => `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const parse_one_condition = (s: string): WhereItem | null => {
+      const col_match = s.match(/^"([^"]*(?:""[^"]*)*)"\s+(.+)$/);
+      if (!col_match) return null;
+      const column = col_match[1].replace(/""/g, '"');
+      const rest = col_match[2].trim();
+      if (rest === "IS NULL") {
+        return { type: "condition", id: gen_id(), column, operator: "IS NULL", value: "" };
+      }
+      if (rest === "IS NOT NULL") {
+        return { type: "condition", id: gen_id(), column, operator: "IS NOT NULL", value: "" };
+      }
+      const in_match = rest.match(/^(IN|NOT IN)\s*\(\s*([\s\S]*)\s*\)\s*$/i);
+      if (in_match) {
+        const op = in_match[1];
+        const values = in_match[2].split(",").map((v) => v.trim().replace(/^'([^']*(?:''[^']*)*)'$/, (_, x) => (x || "").replace(/''/g, "'"))).filter(Boolean);
+        return { type: "condition", id: gen_id(), column, operator: op, value: values.join(", ") };
+      }
+      const like_match = rest.match(/^LIKE\s+'([^']*(?:''[^']*)*)'\s*$/i);
+      if (like_match) {
+        const val = like_match[1].replace(/''/g, "'");
+        const op = val.startsWith("%") && val.endsWith("%") ? "CONTAINS" : "LIKE";
+        return { type: "condition", id: gen_id(), column, operator: op, value: val.replace(/^%|%$/g, "") };
+      }
+      const ilike_match = rest.match(/^ILIKE\s+'([^']*(?:''[^']*)*)'\s*$/i);
+      if (ilike_match) {
+        const val = ilike_match[1].replace(/''/g, "'");
+        return { type: "condition", id: gen_id(), column, operator: "CONTAINS (case-insensitive)", value: val.replace(/^%|%$/g, "") };
+      }
+      const op_val_match = rest.match(/^(=|!=|>=|<=|>|<)\s+'([^']*(?:''[^']*)*)'\s*$/);
+      if (op_val_match) {
+        return { type: "condition", id: gen_id(), column, operator: op_val_match[1], value: op_val_match[2].replace(/''/g, "'") };
+      }
+      return null;
+    };
+
+    const where_items = parse_where_to_items(where_clause);
+    return { where_items, sort_column, sort_direction, page };
+  };
+
+  const apply_parsed_query = (parsed: ParsedQuery) => {
+    set_where_items(parsed.where_items);
+    set_sort_column(parsed.sort_column);
+    set_sort_direction(parsed.sort_direction);
+    set_current_page(parsed.page);
+    router.push({ query: { ...router.query, page: parsed.page.toString() } }, undefined, { shallow: true });
+    const where_clause = parsed.where_items.length > 0 ? build_where_clause(parsed.where_items) : undefined;
+    if (selected_table) {
+      load_table_data(selected_table, parsed.page, parsed.sort_column, parsed.sort_direction, where_clause);
+    }
+  };
+
   const get_query_history = (table_name: string): Array<{
     query: string;
     where_items?: WhereItem[];
@@ -507,6 +611,8 @@ export default function Home() {
                     get_query_history={get_query_history}
                     set_sort_column={set_sort_column}
                     set_sort_direction={set_sort_direction}
+                    parse_query={parse_query}
+                    apply_parsed_query={apply_parsed_query}
                     on_cell_update={() => {
                       if (selected_table) {
                         const where_clause = where_items.length > 0 ? build_where_clause(where_items) : undefined;
@@ -940,6 +1046,8 @@ function TableView({
   get_query_history,
   set_sort_column,
   set_sort_direction,
+  parse_query,
+  apply_parsed_query,
 }: {
   table_name: string;
   table_data: TableData;
@@ -972,6 +1080,8 @@ function TableView({
   }>;
   set_sort_column: React.Dispatch<React.SetStateAction<string | null>>;
   set_sort_direction: React.Dispatch<React.SetStateAction<"asc" | "desc">>;
+  parse_query: (sql: string, table_name: string) => ParsedQuery | null;
+  apply_parsed_query: (parsed: ParsedQuery) => void;
 }) {
   const [column_widths, set_column_widths] = useState<Record<number, number>>({});
   const [is_resizing, set_is_resizing] = useState(false);
@@ -1002,6 +1112,23 @@ function TableView({
   useEffect(() => {
     set_editable_sql(table_data.query || "");
   }, [table_data.query]);
+
+  const build_current_query = (): string => {
+    const table_name_escaped = `"${table_name.replace(/"/g, '""')}"`;
+    let q = `SELECT * FROM ${table_name_escaped}`;
+    const where_clause = where_items.length > 0 ? build_where_clause(where_items) : "";
+    if (where_clause.trim() !== "") {
+      q += ` WHERE ${where_clause}`;
+    }
+    if (sort_column) {
+      const col_escaped = `"${sort_column.replace(/"/g, '""')}"`;
+      const dir = sort_direction === "desc" ? "DESC" : "ASC";
+      q += ` ORDER BY ${col_escaped} ${dir}`;
+    }
+    const offset = (current_page - 1) * 20;
+    q += ` LIMIT 20 OFFSET ${offset}`;
+    return q;
+  };
 
   const predefined_colors = [
     { name: "Blue", value: "#3B82F6" },
@@ -1752,7 +1879,13 @@ function TableView({
                   SQL
                 </button>
                 <button
-                  onClick={() => set_query_view_mode("blocks")}
+                  onClick={() => {
+                    const parsed = table_name ? parse_query(editable_sql, table_name) : null;
+                    if (parsed) {
+                      apply_parsed_query(parsed);
+                    }
+                    set_query_view_mode("blocks");
+                  }}
                   className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
                     (query_view_mode as "sql" | "blocks") === "blocks"
                       ? "bg-[#3ECF8E] text-black"
@@ -1887,7 +2020,10 @@ function TableView({
                   <span>Generate with AI</span>
                 </button>
                 <button
-                  onClick={() => set_query_view_mode("sql")}
+                  onClick={() => {
+                    set_editable_sql(build_current_query());
+                    set_query_view_mode("sql");
+                  }}
                   className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 whitespace-nowrap ${
                     (query_view_mode as "sql" | "blocks") === "sql"
                       ? "bg-[#3ECF8E] text-black"
