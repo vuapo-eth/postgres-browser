@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
 import { useRouter } from "next/router";
 import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, History, Play } from "lucide-react";
 
@@ -1022,6 +1022,152 @@ function WhereBlocksRecursive({
   );
 }
 
+/** System monospace stack — Tailwind `font-mono` maps to an undefined Geist variable in this project, so use this where alignment matters. */
+const MONOSPACE_FONT_STACK =
+  'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+
+function serialize_cell_value_for_text(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+type JsonToken =
+  | { type: "whitespace"; value: string }
+  | { type: "string"; value: string }
+  | { type: "number"; value: string }
+  | { type: "keyword"; value: string }
+  | { type: "punctuation"; value: string };
+
+function tokenize_json_display(json: string): JsonToken[] {
+  const tokens: JsonToken[] = [];
+  let i = 0;
+  while (i < json.length) {
+    const c = json[i];
+    if (c === " " || c === "\n" || c === "\r" || c === "\t") {
+      let j = i;
+      while (j < json.length && /[\s]/.test(json[j])) j++;
+      tokens.push({ type: "whitespace", value: json.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if ("{}[],:".includes(c)) {
+      tokens.push({ type: "punctuation", value: c });
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < json.length) {
+        if (json[j] === "\\" && j + 1 < json.length) {
+          j += 2;
+          continue;
+        }
+        if (json[j] === '"') {
+          j++;
+          break;
+        }
+        j++;
+      }
+      tokens.push({ type: "string", value: json.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if (c === "-" || (c >= "0" && c <= "9")) {
+      let j = i;
+      if (json[j] === "-") j++;
+      while (j < json.length && json[j] >= "0" && json[j] <= "9") j++;
+      if (json[j] === ".") {
+        j++;
+        while (j < json.length && json[j] >= "0" && json[j] <= "9") j++;
+      }
+      if (json[j] === "e" || json[j] === "E") {
+        j++;
+        if (json[j] === "+" || json[j] === "-") j++;
+        while (j < json.length && json[j] >= "0" && json[j] <= "9") j++;
+      }
+      tokens.push({ type: "number", value: json.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if (json.slice(i, i + 4) === "true") {
+      tokens.push({ type: "keyword", value: "true" });
+      i += 4;
+      continue;
+    }
+    if (json.slice(i, i + 5) === "false") {
+      tokens.push({ type: "keyword", value: "false" });
+      i += 5;
+      continue;
+    }
+    if (json.slice(i, i + 4) === "null") {
+      tokens.push({ type: "keyword", value: "null" });
+      i += 4;
+      continue;
+    }
+    tokens.push({ type: "punctuation", value: c });
+    i++;
+  }
+  return tokens;
+}
+
+function JsonSyntaxHighlighted({ json }: { json: string }): ReactNode {
+  const tokens = tokenize_json_display(json);
+  const parts: ReactNode[] = [];
+  let k = 0;
+  for (let t = 0; t < tokens.length; t++) {
+    const tok = tokens[t];
+    if (tok.type === "whitespace") {
+      parts.push(<span key={k++}>{tok.value}</span>);
+      continue;
+    }
+    if (tok.type === "string") {
+      let j = t + 1;
+      while (j < tokens.length && tokens[j].type === "whitespace") j++;
+      const is_key =
+        j < tokens.length && tokens[j].type === "punctuation" && tokens[j].value === ":";
+      parts.push(
+        <span key={k++} className={is_key ? "text-[#93C5FD]" : "text-[#FCD34D]"}>
+          {tok.value}
+        </span>
+      );
+      continue;
+    }
+    if (tok.type === "number") {
+      parts.push(
+        <span key={k++} className="text-[#60A5FA]">
+          {tok.value}
+        </span>
+      );
+      continue;
+    }
+    if (tok.type === "keyword") {
+      parts.push(
+        <span key={k++} className="text-[#C084FC]">
+          {tok.value}
+        </span>
+      );
+      continue;
+    }
+    parts.push(
+      <span key={k++} className="text-[#6B7280]">
+        {tok.value}
+      </span>
+    );
+  }
+  return (
+    <span style={{ fontFamily: MONOSPACE_FONT_STACK }} className="font-mono">
+      {parts}
+    </span>
+  );
+}
+
 function TableView({
   table_name,
   table_data,
@@ -1262,7 +1408,7 @@ function TableView({
   };
 
   const handle_copy = async (cell_value: any, row_idx: number, cell_idx: number) => {
-    const text_to_copy = cell_value === null || cell_value === undefined ? "null" : String(cell_value);
+    const text_to_copy = serialize_cell_value_for_text(cell_value);
     try {
       await navigator.clipboard.writeText(text_to_copy);
       set_copied_cell({ row_idx, cell_idx });
@@ -1275,7 +1421,7 @@ function TableView({
   };
 
   const handle_edit = (cell_value: any, row_idx: number, display_idx: number) => {
-    const initial_value = cell_value === null || cell_value === undefined ? "null" : String(cell_value);
+    const initial_value = serialize_cell_value_for_text(cell_value);
     set_edit_value(initial_value);
     set_editing_cell({ row_idx, cell_idx: display_idx });
   };
@@ -2324,7 +2470,9 @@ function TableView({
                         const is_hovered = hovered_cell?.row_idx === row_idx && hovered_cell?.cell_idx === display_idx;
                         const is_copied = copied_cell?.row_idx === row_idx && copied_cell?.cell_idx === display_idx;
                         const is_editing = editing_cell?.row_idx === row_idx && editing_cell?.cell_idx === display_idx;
+                        const is_object_cell = cell !== null && cell !== undefined && typeof cell === "object";
                         const cell_text = cell === null || cell === undefined ? "null" : String(cell);
+                        const cell_json_text = is_object_cell ? serialize_cell_value_for_text(cell) : "";
                         
                         return (
                           <td
@@ -2350,6 +2498,17 @@ function TableView({
                               {cell === null || cell === undefined
                                 ? (
                                     <span className="text-[#4a4a4a] italic">null</span>
+                                  )
+                                : is_object_cell
+                                ? (
+                                    <pre
+                                      className="m-0 w-full min-h-[4.5rem] max-h-60 overflow-y-auto overflow-x-auto rounded border border-[#2a2a2a] bg-[#0f0f0f] px-2 py-1.5 text-left text-[10px] leading-snug font-mono whitespace-pre-wrap break-words cursor-text [font-variant-ligatures:none]"
+                                      style={{ fontFamily: MONOSPACE_FONT_STACK }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                    >
+                                      <JsonSyntaxHighlighted json={cell_json_text} />
+                                    </pre>
                                   )
                                 : (() => {
                                     const uuid_list = parse_uuids(cell);
