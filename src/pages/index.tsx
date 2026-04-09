@@ -494,6 +494,17 @@ export default function Home() {
       const data = await response.json();
       set_table_data(data);
 
+      if (
+        final_sort_col === null &&
+        Array.isArray(data.columns) &&
+        data.columns.includes("created_unix")
+      ) {
+        set_sort_column("created_unix");
+        set_sort_direction("desc");
+        await load_table_data(table_name, page, "created_unix", "desc", final_where_clause);
+        return;
+      }
+
       if (data.query) {
         save_query_to_history(table_name, data.query, where_items_ref.current, final_sort_col, final_sort_dir);
       }
@@ -1234,6 +1245,7 @@ function TableView({
   const [resizing_column, set_resizing_column] = useState<number | null>(null);
   const [hovered_cell, set_hovered_cell] = useState<{ row_idx: number; cell_idx: number } | null>(null);
   const [copied_cell, set_copied_cell] = useState<{ row_idx: number; cell_idx: number } | null>(null);
+  const [copied_row_idx, set_copied_row_idx] = useState<number | null>(null);
   const [editing_cell, set_editing_cell] = useState<{ row_idx: number; cell_idx: number } | null>(null);
   const [edit_value, set_edit_value] = useState("");
   const [is_saving, set_is_saving] = useState(false);
@@ -1254,6 +1266,7 @@ function TableView({
   const [is_ai_generating, set_is_ai_generating] = useState(false);
   const [editable_sql, set_editable_sql] = useState(table_data.query || "");
   const [is_sql_copied, set_is_sql_copied] = useState(false);
+  const [timestamp_display_mode, set_timestamp_display_mode] = useState<"absolute" | "relative">("absolute");
 
   useEffect(() => {
     set_editable_sql(table_data.query || "");
@@ -1300,6 +1313,17 @@ function TableView({
     if (table_data.columns.length > 0 && columns_key !== columns_key_ref.current) {
       columns_key_ref.current = columns_key;
       const initial_order = table_data.columns.map((_, idx) => idx);
+      const id_idx = table_data.columns.findIndex((col) => col === "id");
+      const created_unix_idx = table_data.columns.findIndex((col) => col === "created_unix");
+      if (id_idx !== -1 && created_unix_idx !== -1 && created_unix_idx !== id_idx + 1) {
+        const from = initial_order.indexOf(created_unix_idx);
+        const to = initial_order.indexOf(id_idx) + 1;
+        if (from !== -1 && to !== -1 && from !== to) {
+          initial_order.splice(from, 1);
+          const adjusted_to = from < to ? to - 1 : to;
+          initial_order.splice(adjusted_to, 0, created_unix_idx);
+        }
+      }
       set_column_order(initial_order);
       const initial_visibility: Record<number, boolean> = {};
       const initial_colors: Record<number, string> = {};
@@ -1417,6 +1441,24 @@ function TableView({
       }, 2000);
     } catch (err) {
       console.error("Failed to copy:", err);
+    }
+  };
+
+  const row_to_json_string = (row: any[]) => {
+    const obj: Record<string, unknown> = {};
+    table_data.columns.forEach((col, i) => {
+      obj[col] = row[i];
+    });
+    return JSON.stringify(obj, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2);
+  };
+
+  const handle_copy_row = async (row: any[], row_idx: number) => {
+    try {
+      await navigator.clipboard.writeText(row_to_json_string(row));
+      set_copied_row_idx(row_idx);
+      setTimeout(() => set_copied_row_idx(null), 2000);
+    } catch (err) {
+      console.error("Failed to copy row:", err);
     }
   };
 
@@ -1652,6 +1694,49 @@ function TableView({
     const str = String(value).trim();
     const datetime_regex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z?$/;
     return datetime_regex.test(str);
+  };
+
+  const is_unix_timestamp_seconds = (value: any): boolean => {
+    if (value === null || value === undefined) return false;
+    const str = String(value).trim();
+    return /^\d{10}$/.test(str);
+  };
+
+  const format_unix_timestamp_absolute = (unix_seconds: number): string => {
+    const date = new Date(unix_seconds * 1000);
+    if (Number.isNaN(date.getTime())) return "";
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    const year = date.getFullYear();
+    const month = pad2(date.getMonth() + 1);
+    const day = pad2(date.getDate());
+    const hours = pad2(date.getHours());
+    const minutes = pad2(date.getMinutes());
+    return `${year}-${month}-${day} - ${hours}:${minutes}`;
+  };
+
+  const format_relative_to_now = (date: Date): string => {
+    const diff_seconds = Math.round((date.getTime() - Date.now()) / 1000);
+    const abs_seconds = Math.abs(diff_seconds);
+    if (abs_seconds < 5) return "just now";
+    const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+    if (abs_seconds < 60) return formatter.format(diff_seconds, "second");
+    if (abs_seconds < 3600) return formatter.format(Math.round(diff_seconds / 60), "minute");
+    if (abs_seconds < 86400) return formatter.format(Math.round(diff_seconds / 3600), "hour");
+    if (abs_seconds < 604800) return formatter.format(Math.round(diff_seconds / 86400), "day");
+    if (abs_seconds < 2629800) return formatter.format(Math.round(diff_seconds / 604800), "week");
+    if (abs_seconds < 31557600) return formatter.format(Math.round(diff_seconds / 2629800), "month");
+    return formatter.format(Math.round(diff_seconds / 31557600), "year");
+  };
+
+  const get_unix_timestamp_badge_classes = (date: Date): string => {
+    const age_ms = Date.now() - date.getTime();
+    if (age_ms >= 0 && age_ms < 60 * 60 * 1000) {
+      return "bg-[#3ECF8E]/15 text-[#6EE7B7]";
+    }
+    if (age_ms >= 0 && age_ms < 24 * 60 * 60 * 1000) {
+      return "bg-[#F59E0B]/15 text-[#FCD34D]";
+    }
+    return "bg-[#8b8b8b]/15 text-[#b5b5b5]";
   };
 
   const is_image_url = (value: any): boolean => {
@@ -2241,6 +2326,33 @@ function TableView({
         </div>
       ) : (
         <>
+          <div className="mb-3 flex items-center gap-2 flex-shrink-0">
+            <span className="text-xs text-[#8b8b8b]">Timestamp badge</span>
+            <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#0f0f0f] p-1">
+              <button
+                type="button"
+                onClick={() => set_timestamp_display_mode("absolute")}
+                className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                  timestamp_display_mode === "absolute"
+                    ? "bg-[#F59E0B]/20 text-[#FCD34D]"
+                    : "text-[#8b8b8b] hover:text-white hover:bg-[#1f1f1f]"
+                }`}
+              >
+                YYYY-MM-DD - HH:ii
+              </button>
+              <button
+                type="button"
+                onClick={() => set_timestamp_display_mode("relative")}
+                className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                  timestamp_display_mode === "relative"
+                    ? "bg-[#F59E0B]/20 text-[#FCD34D]"
+                    : "text-[#8b8b8b] hover:text-white hover:bg-[#1f1f1f]"
+                }`}
+              >
+                From now
+              </button>
+            </div>
+          </div>
           {column_badges_expanded && (
             <div className="mb-3 flex flex-col gap-2 flex-shrink-0">
               <div className="flex items-center gap-2">
@@ -2403,6 +2515,12 @@ function TableView({
               >
               <thead className="bg-[#0f0f0f]">
                 <tr>
+                  <th
+                    scope="col"
+                    className="w-10 min-w-[2.5rem] max-w-[2.5rem] px-2 py-3 text-left border-r border-[#2a2a2a] relative select-none"
+                  >
+                    <span className="sr-only">Copy row as JSON</span>
+                  </th>
                   {get_visible_ordered_columns().map((column_idx, display_idx) => {
                     const column = table_data.columns[column_idx];
                     const visible_columns = get_visible_ordered_columns();
@@ -2465,6 +2583,23 @@ function TableView({
                   const visible_columns = get_visible_ordered_columns();
                   return (
                     <tr key={row_idx} className="hover:bg-[#1f1f1f] transition-colors">
+                      <td
+                        className="w-10 min-w-[2.5rem] max-w-[2.5rem] px-2 py-4 align-middle border-r border-[#2a2a2a]"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handle_copy_row(row, row_idx)}
+                          className="p-1.5 rounded-md border border-[#2a2a2a] bg-[#0f0f0f] hover:bg-[#1f1f1f] hover:border-[#3ECF8E]/50 transition-all"
+                          title="Copy row as JSON"
+                        >
+                          {copied_row_idx === row_idx ? (
+                            <Check className="w-3.5 h-3.5 text-[#3ECF8E]" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5 text-[#8b8b8b] hover:text-[#3ECF8E]" />
+                          )}
+                        </button>
+                      </td>
                       {visible_columns.map((column_idx, display_idx) => {
                         const cell = row[column_idx];
                         const is_hovered = hovered_cell?.row_idx === row_idx && hovered_cell?.cell_idx === display_idx;
@@ -2562,6 +2697,25 @@ function TableView({
                                             </div>
                                           )}
                                         </span>
+                                      );
+                                    } else if (is_unix_timestamp_seconds(cell)) {
+                                      const unix_seconds = Number(cell_text);
+                                      const unix_date = new Date(unix_seconds * 1000);
+                                      const absolute_text = format_unix_timestamp_absolute(unix_seconds);
+                                      const relative_text = Number.isNaN(unix_date.getTime()) ? "" : format_relative_to_now(unix_date);
+                                      const badge_text = timestamp_display_mode === "absolute" ? absolute_text : relative_text;
+                                      const badge_color_classes = Number.isNaN(unix_date.getTime())
+                                        ? "bg-[#8b8b8b]/15 text-[#b5b5b5]"
+                                        : get_unix_timestamp_badge_classes(unix_date);
+                                      return (
+                                        <div className="flex flex-col gap-1 min-w-0 max-w-full">
+                                          <span className="inline-block max-w-full truncate">{cell_text}</span>
+                                          {badge_text && (
+                                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full font-mono text-xs whitespace-nowrap overflow-hidden text-ellipsis w-fit max-w-full ${badge_color_classes}`}>
+                                              {badge_text}
+                                            </span>
+                                          )}
+                                        </div>
                                       );
                                     } else if (show_images && is_image_url(cell)) {
                                       const optimized_url = optimize_cloudinary_url(cell_text);
