@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
 import { useRouter } from "next/router";
-import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, History, Play } from "lucide-react";
+import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, ChevronRight, History, Play, Maximize2, Minimize2 } from "lucide-react";
 
 type TableInfo = {
   table_name: string;
@@ -1179,6 +1179,114 @@ function JsonSyntaxHighlighted({ json }: { json: string }): ReactNode {
   );
 }
 
+function JsonCellViewer({ value }: { value: unknown }): ReactNode {
+  const [collapsed_paths, set_collapsed_paths] = useState<Set<string>>(new Set());
+  const [is_fullscreen, set_is_fullscreen] = useState(false);
+
+  const toggle_path = (path: string) => {
+    set_collapsed_paths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const render_leaf = (leaf: unknown): ReactNode => {
+    if (typeof leaf === "string") return <span className="text-[#FCD34D]">"{leaf}"</span>;
+    if (typeof leaf === "number") return <span className="text-[#60A5FA]">{String(leaf)}</span>;
+    if (typeof leaf === "boolean") return <span className="text-[#C084FC]">{String(leaf)}</span>;
+    if (leaf === null) return <span className="text-[#C084FC]">null</span>;
+    return <span className="text-white">{String(leaf)}</span>;
+  };
+
+  const render_node = (node: unknown, path: string, depth = 0): ReactNode => {
+    if (node === null || typeof node !== "object") return render_leaf(node);
+
+    const is_array = Array.isArray(node);
+    const entries = is_array
+      ? (node as unknown[]).map((item, idx) => [String(idx), item] as const)
+      : Object.entries(node as Record<string, unknown>);
+    const collapsed = collapsed_paths.has(path);
+    const summary = is_array ? `[${entries.length}]` : `{${entries.length}}`;
+
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggle_path(path);
+          }}
+          className="inline-flex items-center gap-1 text-[#8b8b8b] hover:text-white transition-colors"
+        >
+          {collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          <span>{summary}</span>
+        </button>
+        {!collapsed && (
+          <div className="mt-1 space-y-1">
+            {entries.map(([key, child]) => {
+              const child_path = `${path}.${key}`;
+              return (
+                <div key={child_path} className="flex items-start gap-1.5" style={{ marginLeft: `${(depth + 1) * 12}px` }}>
+                  <span className="text-[#93C5FD]">{is_array ? key : `"${key}"`}:</span>
+                  <div className="min-w-0 break-words">{render_node(child, child_path, depth + 1)}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <div
+        className="w-full min-h-[4.5rem] max-h-60 overflow-auto rounded border border-[#2a2a2a] bg-[#0f0f0f] p-2 text-left text-[10px] leading-snug font-mono relative [font-variant-ligatures:none]"
+        style={{ fontFamily: MONOSPACE_FONT_STACK }}
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            set_is_fullscreen(true);
+          }}
+          className="absolute top-1 right-1 p-1 rounded hover:bg-[#1f1f1f] text-[#8b8b8b] hover:text-white transition-colors"
+          title="Fullscreen JSON viewer"
+        >
+          <Maximize2 className="w-3 h-3" />
+        </button>
+        {render_node(value, "root")}
+      </div>
+
+      {is_fullscreen && (
+        <div className="fixed inset-0 z-[70] bg-black p-[10vh]" onClick={() => set_is_fullscreen(false)}>
+          <div
+            className="h-full w-full rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-4 overflow-auto font-mono text-xs leading-relaxed"
+            style={{ fontFamily: MONOSPACE_FONT_STACK }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-end mb-2">
+              <button
+                type="button"
+                onClick={() => set_is_fullscreen(false)}
+                className="p-1.5 rounded hover:bg-[#1f1f1f] text-[#8b8b8b] hover:text-white transition-colors"
+                title="Exit fullscreen JSON viewer"
+              >
+                <Minimize2 className="w-4 h-4" />
+              </button>
+            </div>
+            {render_node(value, "root")}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function TableView({
   table_name,
   table_data,
@@ -1267,6 +1375,9 @@ function TableView({
   const [editable_sql, set_editable_sql] = useState(table_data.query || "");
   const [is_sql_copied, set_is_sql_copied] = useState(false);
   const [timestamp_display_mode, set_timestamp_display_mode] = useState<"absolute" | "relative">("absolute");
+  const [json_editor_collapsed_paths, set_json_editor_collapsed_paths] = useState<Set<string>>(new Set());
+  const [is_json_editor_fullscreen, set_is_json_editor_fullscreen] = useState(false);
+  const [is_json_edit_session, set_is_json_edit_session] = useState(false);
 
   useEffect(() => {
     set_editable_sql(table_data.query || "");
@@ -1464,8 +1575,18 @@ function TableView({
 
   const handle_edit = (cell_value: any, row_idx: number, display_idx: number) => {
     const initial_value = serialize_cell_value_for_text(cell_value);
+    let parsed_is_container = false;
+    try {
+      const parsed = JSON.parse(initial_value);
+      parsed_is_container = parsed !== null && typeof parsed === "object";
+    } catch {
+      parsed_is_container = false;
+    }
     set_edit_value(initial_value);
     set_editing_cell({ row_idx, cell_idx: display_idx });
+    set_is_json_edit_session((cell_value !== null && typeof cell_value === "object") || parsed_is_container);
+    set_json_editor_collapsed_paths(new Set());
+    set_is_json_editor_fullscreen(false);
   };
 
   const handle_save_edit = async () => {
@@ -1487,6 +1608,9 @@ function TableView({
           row_index: editing_cell.row_idx,
           page: current_page,
           limit: 20,
+          sort_column,
+          sort_direction,
+          where_clause: where_items.length > 0 ? build_where_clause(where_items) : undefined,
           new_value: edit_value.trim() === "null" || edit_value.trim() === "" ? null : edit_value,
         }),
       });
@@ -1498,6 +1622,7 @@ function TableView({
 
       set_editing_cell(null);
       set_edit_value("");
+      set_is_json_edit_session(false);
       set_toast({ message: "Cell updated successfully", type: "success" });
       setTimeout(() => set_toast(null), 3000);
       on_cell_update();
@@ -1512,6 +1637,91 @@ function TableView({
   const handle_cancel_edit = () => {
     set_editing_cell(null);
     set_edit_value("");
+    set_is_json_edit_session(false);
+    set_json_editor_collapsed_paths(new Set());
+    set_is_json_editor_fullscreen(false);
+  };
+
+  const parse_json_editor_value = (text: string): Record<string, unknown> | unknown[] | null => {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed !== null && typeof parsed === "object") {
+        return parsed as Record<string, unknown> | unknown[];
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
+
+  const is_json_container = (value: unknown): value is Record<string, unknown> | unknown[] =>
+    value !== null && typeof value === "object";
+
+  const toggle_json_node = (path: string) => {
+    set_json_editor_collapsed_paths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  const render_json_tree = (value: unknown, path = "root", depth = 0): ReactNode => {
+    if (!is_json_container(value)) {
+      if (typeof value === "string") {
+        return <span className="text-[#FCD34D]">"{value}"</span>;
+      }
+      if (typeof value === "number") {
+        return <span className="text-[#60A5FA]">{String(value)}</span>;
+      }
+      if (typeof value === "boolean") {
+        return <span className="text-[#EC4899]">{String(value)}</span>;
+      }
+      if (value === null) {
+        return <span className="text-[#8b8b8b] italic">null</span>;
+      }
+      return <span className="text-white">{String(value)}</span>;
+    }
+
+    const is_array = Array.isArray(value);
+    const entries = is_array
+      ? (value as unknown[]).map((v, idx) => [String(idx), v] as const)
+      : Object.entries(value as Record<string, unknown>);
+    const collapsed = json_editor_collapsed_paths.has(path);
+    const summary = is_array ? `[${entries.length}]` : `{${entries.length}}`;
+
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => toggle_json_node(path)}
+          className="inline-flex items-center gap-1 text-left hover:text-white transition-colors"
+        >
+          {collapsed ? (
+            <ChevronRight className="w-3 h-3 text-[#8b8b8b]" />
+          ) : (
+            <ChevronDown className="w-3 h-3 text-[#8b8b8b]" />
+          )}
+          <span className="text-[#8b8b8b] text-xs">{summary}</span>
+        </button>
+        {!collapsed && (
+          <div className="mt-1 space-y-1">
+            {entries.map(([key, child]) => {
+              const child_path = `${path}.${key}`;
+              return (
+                <div key={child_path} className="flex items-start gap-2" style={{ marginLeft: `${(depth + 1) * 12}px` }}>
+                  <span className="font-mono text-[11px] text-[#3ECF8E]">{is_array ? key : `"${key}"`}:</span>
+                  <div className="font-mono text-[11px] text-white break-words min-w-0">{render_json_tree(child, child_path, depth + 1)}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const toggle_column_visibility = (column_idx: number) => {
@@ -2636,14 +2846,7 @@ function TableView({
                                   )
                                 : is_object_cell
                                 ? (
-                                    <pre
-                                      className="m-0 w-full min-h-[4.5rem] max-h-60 overflow-y-auto overflow-x-auto rounded border border-[#2a2a2a] bg-[#0f0f0f] px-2 py-1.5 text-left text-[10px] leading-snug font-mono whitespace-pre-wrap break-words cursor-text [font-variant-ligatures:none]"
-                                      style={{ fontFamily: MONOSPACE_FONT_STACK }}
-                                      onClick={(e) => e.stopPropagation()}
-                                      onMouseDown={(e) => e.stopPropagation()}
-                                    >
-                                      <JsonSyntaxHighlighted json={cell_json_text} />
-                                    </pre>
+                                    <JsonCellViewer value={cell} />
                                   )
                                 : (() => {
                                     const uuid_list = parse_uuids(cell);
@@ -2787,21 +2990,42 @@ function TableView({
       )}
       
       {editing_cell !== null && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={handle_cancel_edit}>
+        <div
+          className={`fixed inset-0 ${is_json_editor_fullscreen ? "bg-black" : "bg-black/50"} flex items-center justify-center z-50 ${
+            is_json_editor_fullscreen ? "p-[10vh]" : ""
+          }`}
+          onClick={handle_cancel_edit}
+        >
           <div
-            className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg p-6 w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col"
+            className={`bg-[#1a1a1a] border border-[#2a2a2a] ${is_json_editor_fullscreen ? "rounded-none h-full w-full max-w-none max-h-none p-4" : "rounded-lg p-6 w-full max-w-2xl mx-4 max-h-[80vh]"} flex flex-col`}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-white">
                 Edit Cell
               </h3>
-              <button
-                onClick={handle_cancel_edit}
-                className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
-              >
-                <X className="w-5 h-5 text-[#8b8b8b]" />
-              </button>
+              <div className="flex items-center gap-2">
+                {is_json_edit_session && (
+                  <button
+                    type="button"
+                    onClick={() => set_is_json_editor_fullscreen((prev) => !prev)}
+                    className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
+                    title={is_json_editor_fullscreen ? "Exit fullscreen JSON editor" : "Fullscreen JSON editor"}
+                  >
+                    {is_json_editor_fullscreen ? (
+                      <Minimize2 className="w-4 h-4 text-[#8b8b8b]" />
+                    ) : (
+                      <Maximize2 className="w-4 h-4 text-[#8b8b8b]" />
+                    )}
+                  </button>
+                )}
+                <button
+                  onClick={handle_cancel_edit}
+                  className="p-1 hover:bg-[#1f1f1f] rounded transition-colors"
+                >
+                  <X className="w-5 h-5 text-[#8b8b8b]" />
+                </button>
+              </div>
             </div>
             
             <div className="mb-4">
@@ -2813,13 +3037,55 @@ function TableView({
               </label>
             </div>
             
-            <textarea
-              value={edit_value}
-              onChange={(e) => set_edit_value(e.target.value)}
-              className="w-full px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all resize-none flex-1 min-h-[200px] font-mono text-sm"
-              placeholder="Enter cell value..."
-              autoFocus
-            />
+            {(() => {
+              const parsed_json = parse_json_editor_value(edit_value);
+              if (!parsed_json) {
+                return (
+                  <textarea
+                    value={edit_value}
+                    onChange={(e) => set_edit_value(e.target.value)}
+                    className="w-full px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all resize-none flex-1 min-h-[200px] font-mono text-sm"
+                    placeholder="Enter cell value..."
+                    autoFocus
+                  />
+                );
+              }
+              return (
+                <div className="flex-1 min-h-0 flex flex-col gap-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-[#8b8b8b]">JSON tree (expand/collapse nodes)</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => set_json_editor_collapsed_paths(new Set(["root"]))}
+                        className="px-2 py-1 text-[11px] rounded border border-[#2a2a2a] text-[#8b8b8b] hover:text-white hover:bg-[#1f1f1f]"
+                      >
+                        Collapse all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => set_json_editor_collapsed_paths(new Set())}
+                        className="px-2 py-1 text-[11px] rounded border border-[#2a2a2a] text-[#8b8b8b] hover:text-white hover:bg-[#1f1f1f]"
+                      >
+                        Expand all
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex-1 min-h-[180px] overflow-auto rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-3">
+                    <div className="font-mono text-[11px] leading-relaxed">
+                      {render_json_tree(parsed_json)}
+                    </div>
+                  </div>
+                  <textarea
+                    value={edit_value}
+                    onChange={(e) => set_edit_value(e.target.value)}
+                    className="w-full px-4 py-3 bg-[#0f0f0f] border border-[#2a2a2a] rounded-lg text-white placeholder-[#4a4a4a] focus:outline-none focus:ring-2 focus:ring-[#3ECF8E] focus:border-transparent transition-all resize-none min-h-[140px] max-h-[40vh] font-mono text-sm"
+                    placeholder="Edit raw JSON..."
+                    autoFocus
+                  />
+                </div>
+              );
+            })()}
             
             <div className="flex items-center justify-end gap-3 mt-4">
               <button
