@@ -44,9 +44,14 @@ type ParsedQuery = {
   page: number;
 };
 
+const POSTGRES_URL_STORAGE_KEY = "postgres_url";
+const POSTGRES_URL_HISTORY_STORAGE_KEY = "postgres_url_history";
+const MAX_SAVED_CONNECTIONS = 5;
+
 export default function Home() {
   const router = useRouter();
   const [postgres_url, set_postgres_url] = useState("");
+  const [saved_postgres_urls, set_saved_postgres_urls] = useState<string[]>([]);
   const [is_connected, set_is_connected] = useState(false);
   const [tables, set_tables] = useState<TableInfo[]>([]);
   const [selected_table, set_selected_table] = useState<string | null>(null);
@@ -75,7 +80,26 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const stored_url = localStorage.getItem("postgres_url");
+    const stored_history = localStorage.getItem(POSTGRES_URL_HISTORY_STORAGE_KEY);
+    let saved_urls: string[] = [];
+    if (stored_history) {
+      try {
+        const parsed_history = JSON.parse(stored_history);
+        if (Array.isArray(parsed_history)) {
+          saved_urls = parsed_history.filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+        }
+      } catch {
+        saved_urls = [];
+      }
+    }
+
+    const stored_url = localStorage.getItem(POSTGRES_URL_STORAGE_KEY);
+    if (stored_url && !saved_urls.includes(stored_url)) {
+      saved_urls = [stored_url, ...saved_urls].slice(0, MAX_SAVED_CONNECTIONS);
+      localStorage.setItem(POSTGRES_URL_HISTORY_STORAGE_KEY, JSON.stringify(saved_urls));
+    }
+    set_saved_postgres_urls(saved_urls);
+
     if (stored_url) {
       set_postgres_url(stored_url);
     }
@@ -128,8 +152,37 @@ export default function Home() {
     localStorage.setItem("starred_tables", JSON.stringify(Array.from(new_starred)));
   };
 
-  const handle_connect = async () => {
-    if (!postgres_url.trim()) {
+  const save_postgres_url = (url: string) => {
+    const trimmed_url = url.trim();
+    if (!trimmed_url) return;
+
+    const updated_urls = [
+      trimmed_url,
+      ...saved_postgres_urls.filter((saved_url) => saved_url !== trimmed_url),
+    ].slice(0, MAX_SAVED_CONNECTIONS);
+
+    set_saved_postgres_urls(updated_urls);
+    localStorage.setItem(POSTGRES_URL_HISTORY_STORAGE_KEY, JSON.stringify(updated_urls));
+    localStorage.setItem(POSTGRES_URL_STORAGE_KEY, trimmed_url);
+  };
+
+  const remove_saved_postgres_url = (url: string) => {
+    const updated_urls = saved_postgres_urls.filter((saved_url) => saved_url !== url);
+    set_saved_postgres_urls(updated_urls);
+    localStorage.setItem(POSTGRES_URL_HISTORY_STORAGE_KEY, JSON.stringify(updated_urls));
+    if (localStorage.getItem(POSTGRES_URL_STORAGE_KEY) === url) {
+      localStorage.removeItem(POSTGRES_URL_STORAGE_KEY);
+    }
+  };
+
+  const handle_saved_connection_click = (url: string) => {
+    set_postgres_url(url);
+    handle_connect(url);
+  };
+
+  const handle_connect = async (connection_url = postgres_url) => {
+    const trimmed_url = connection_url.trim();
+    if (!trimmed_url) {
       set_error("Please enter a PostgreSQL connection URL");
       return;
     }
@@ -141,7 +194,7 @@ export default function Home() {
       const response = await fetch("/api/tables", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ postgres_url }),
+        body: JSON.stringify({ postgres_url: trimmed_url }),
       });
 
       if (!response.ok) {
@@ -152,7 +205,8 @@ export default function Home() {
       const data = await response.json();
       set_tables(data.tables);
       set_is_connected(true);
-      localStorage.setItem("postgres_url", postgres_url);
+      set_postgres_url(trimmed_url);
+      save_postgres_url(trimmed_url);
     } catch (err: any) {
       set_error(err.message || "Failed to connect to database");
       set_is_connected(false);
@@ -200,7 +254,7 @@ export default function Home() {
   };
 
   const handle_log_out = () => {
-    localStorage.removeItem("postgres_url");
+    localStorage.removeItem(POSTGRES_URL_STORAGE_KEY);
     set_postgres_url("");
     set_is_connected(false);
     set_tables([]);
@@ -564,6 +618,9 @@ export default function Home() {
           handle_connect={handle_connect}
           is_loading={is_loading}
           error={error}
+          saved_postgres_urls={saved_postgres_urls}
+          handle_saved_connection_click={handle_saved_connection_click}
+          remove_saved_postgres_url={remove_saved_postgres_url}
         />
       ) : (
         <div className="h-screen flex flex-col p-6 lg:p-8">
@@ -649,18 +706,36 @@ export default function Home() {
   );
 }
 
+function mask_connection_string(connection_string: string) {
+  try {
+    const url = new URL(connection_string);
+    if (url.password) {
+      url.password = "********";
+    }
+    return url.toString();
+  } catch {
+    return connection_string.replace(/(:\/\/[^:\s]+:)([^@\s]+)(@)/, "$1********$3");
+  }
+}
+
 function HeroSection({
   postgres_url,
   set_postgres_url,
   handle_connect,
   is_loading,
   error,
+  saved_postgres_urls,
+  handle_saved_connection_click,
+  remove_saved_postgres_url,
 }: {
   postgres_url: string;
   set_postgres_url: (url: string) => void;
   handle_connect: () => void;
   is_loading: boolean;
   error: string | null;
+  saved_postgres_urls: string[];
+  handle_saved_connection_click: (url: string) => void;
+  remove_saved_postgres_url: (url: string) => void;
 }) {
   return (
     <div className="relative min-h-screen flex items-center justify-center px-4 py-20 overflow-hidden">
@@ -716,7 +791,7 @@ function HeroSection({
           )}
           
           <button
-            onClick={handle_connect}
+            onClick={() => handle_connect()}
             disabled={is_loading}
             className="w-full bg-[#3ECF8E] hover:bg-[#24B47E] text-black font-semibold py-3 px-6 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98]"
           >
@@ -733,6 +808,40 @@ function HeroSection({
               </>
             )}
           </button>
+
+          {saved_postgres_urls.length > 0 && (
+            <div className="mt-6 pt-6 border-t border-[#2a2a2a]">
+              <div className="flex items-center gap-2 mb-3 text-sm font-medium text-[#8b8b8b]">
+                <History className="w-4 h-4" />
+                <span>Saved connections</span>
+              </div>
+              <div className="space-y-2">
+                {saved_postgres_urls.map((saved_url) => (
+                  <div
+                    key={saved_url}
+                    className="group flex items-center gap-2 rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] hover:border-[#3ECF8E]/50 transition-all"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handle_saved_connection_click(saved_url)}
+                      disabled={is_loading}
+                      className="flex-1 min-w-0 px-4 py-3 text-left text-sm text-[#d1d5db] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <span className="block truncate">{mask_connection_string(saved_url)}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => remove_saved_postgres_url(saved_url)}
+                      className="mr-2 rounded-md p-2 text-[#6b7280] opacity-0 transition-all hover:bg-[#1f1f1f] hover:text-[#ff6b6b] group-hover:opacity-100 focus:opacity-100"
+                      aria-label="Remove saved connection"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="mt-12 grid grid-cols-1 md:grid-cols-3 gap-6">
