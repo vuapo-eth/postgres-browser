@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import type { ParsedUrlQuery } from "querystring";
 import { useRouter } from "next/router";
 import { Database, Table2, Sparkles, ArrowRight, Search, Star, Copy, Check, Eye, EyeOff, GripVertical, Palette, Edit, X, AlertCircle, Lock, ArrowUp, ArrowDown, Blocks, Code, ChevronDown, ChevronUp, ChevronRight, History, Play, Maximize2, Minimize2 } from "lucide-react";
 
@@ -47,6 +48,13 @@ type ParsedQuery = {
 const POSTGRES_URL_STORAGE_KEY = "postgres_url";
 const POSTGRES_URL_HISTORY_STORAGE_KEY = "postgres_url_history";
 const MAX_SAVED_CONNECTIONS = 5;
+
+function get_sql_from_router_query(query: ParsedUrlQuery): string | undefined {
+  const raw = query.sql;
+  const s = typeof raw === "string" ? raw : Array.isArray(raw) ? raw[0] : undefined;
+  const t = s?.trim();
+  return t || undefined;
+}
 
 export default function Home() {
   const router = useRouter();
@@ -129,10 +137,11 @@ export default function Home() {
 
   useEffect(() => {
     if (is_connected && selected_table) {
+      if (get_sql_from_router_query(router.query)) return;
       const page_from_url = router.query.page as string;
       const page_num = page_from_url ? parseInt(page_from_url, 10) : current_page;
       const page_to_load = !isNaN(page_num) && page_num > 0 ? page_num : current_page;
-      
+
       const where_clause = where_items.length > 0 ? build_where_clause(where_items) : undefined;
       load_table_data(selected_table, page_to_load, sort_column, sort_direction, where_clause);
       if (page_to_load !== current_page) {
@@ -221,7 +230,9 @@ export default function Home() {
     set_sort_column(null);
     set_sort_direction("asc");
     set_where_items([]);
-    router.push({ query: { ...router.query, table: table_name, page: "1" } }, undefined, { shallow: true });
+    const next_query = { ...router.query, table: table_name, page: "1" } as Record<string, string | string[] | undefined>;
+    delete next_query.sql;
+    router.push({ query: next_query }, undefined, { shallow: true });
     await load_table_data(table_name, 1, null, "asc");
   };
 
@@ -499,6 +510,22 @@ export default function Home() {
     }
   };
 
+  const sync_sql_to_url = useCallback(
+    (sql: string | undefined) => {
+      if (!router.isReady) return;
+      const normalized = sql?.trim() ? sql : undefined;
+      if (get_sql_from_router_query(router.query) === normalized) return;
+      const next = { ...router.query } as Record<string, string | string[] | undefined>;
+      if (normalized) {
+        next.sql = normalized;
+      } else {
+        delete next.sql;
+      }
+      void router.replace({ pathname: router.pathname, query: next }, undefined, { shallow: true });
+    },
+    [router]
+  );
+
   const get_query_history = (table_name: string): Array<{
     query: string;
     where_items?: WhereItem[];
@@ -561,6 +588,7 @@ export default function Home() {
 
       if (data.query) {
         save_query_to_history(table_name, data.query, where_items_ref.current, final_sort_col, final_sort_dir);
+        sync_sql_to_url(data.query);
       }
     } catch (err: any) {
       set_error(err.message || "Failed to load table data");
@@ -584,12 +612,33 @@ export default function Home() {
       }
       const data = await response.json();
       set_table_data(data);
+      if (data.query) {
+        sync_sql_to_url(data.query);
+      }
     } catch (err: any) {
       set_error(err.message || "Failed to run query");
     } finally {
       set_is_loading(false);
     }
   };
+
+  const url_sql_bootstrapped_ref = useRef(false);
+
+  useEffect(() => {
+    url_sql_bootstrapped_ref.current = false;
+  }, [selected_table]);
+
+  useEffect(() => {
+    if (!router.isReady || !is_connected || !selected_table) return;
+    if (url_sql_bootstrapped_ref.current) return;
+    const sql_from_url = get_sql_from_router_query(router.query);
+    if (!sql_from_url) {
+      url_sql_bootstrapped_ref.current = true;
+      return;
+    }
+    url_sql_bootstrapped_ref.current = true;
+    void run_custom_sql(sql_from_url);
+  }, [router.isReady, is_connected, selected_table]);
 
   const handle_page_change = (new_page: number) => {
     if (!selected_table) return;
