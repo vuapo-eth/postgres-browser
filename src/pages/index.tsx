@@ -1340,15 +1340,17 @@ function JsonSyntaxHighlighted({ json }: { json: string }): ReactNode {
 const CELL_CONTENT_COLLAPSE_THRESHOLD = 3000;
 const CELL_CONTENT_PREVIEW_LENGTH = 100;
 
-function LongTextCell({ text }: { text: string }) {
+function LongTextCell({ text, expanded_content }: { text: string; expanded_content?: ReactNode }) {
   const [is_expanded, set_is_expanded] = useState(false);
 
   if (is_expanded) {
     return (
       <span className="inline-flex flex-col gap-1 min-w-0 max-w-full">
-        <span className="inline-block max-w-full break-words whitespace-pre-wrap text-sm text-white max-h-60 overflow-auto">
-          {text}
-        </span>
+        {expanded_content ?? (
+          <span className="inline-block max-w-full break-words whitespace-pre-wrap text-sm text-white max-h-60 overflow-auto">
+            {text}
+          </span>
+        )}
         <button
           type="button"
           onClick={(e) => {
@@ -3023,7 +3025,10 @@ function TableView({
                         const is_editing = editing_cell?.row_idx === row_idx && editing_cell?.cell_idx === display_idx;
                         const is_object_cell = cell !== null && cell !== undefined && typeof cell === "object";
                         const cell_text = cell === null || cell === undefined ? "null" : String(cell);
-                        const cell_json_text = is_object_cell ? serialize_cell_value_for_text(cell) : "";
+                        const cell_display_text = is_object_cell
+                          ? serialize_cell_value_for_text(cell)
+                          : cell_text;
+                        const is_long_cell = cell_display_text.length > CELL_CONTENT_COLLAPSE_THRESHOLD;
                         
                         return (
                           <td
@@ -3050,14 +3055,20 @@ function TableView({
                                 ? (
                                     <span className="text-[#4a4a4a] italic">null</span>
                                   )
+                                : is_long_cell
+                                ? (
+                                    <LongTextCell
+                                      text={cell_display_text}
+                                      expanded_content={
+                                        is_object_cell ? <JsonCellViewer value={cell} /> : undefined
+                                      }
+                                    />
+                                  )
                                 : is_object_cell
                                 ? (
                                     <JsonCellViewer value={cell} />
                                   )
                                 : (() => {
-                                    if (cell_text.length > CELL_CONTENT_COLLAPSE_THRESHOLD) {
-                                      return <LongTextCell text={cell_text} />;
-                                    }
                                     const uuid_list = parse_uuids(cell);
                                     if (uuid_list) {
                                       return (
