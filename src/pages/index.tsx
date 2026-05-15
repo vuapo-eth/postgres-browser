@@ -1288,6 +1288,54 @@ function JsonSyntaxHighlighted({ json }: { json: string }): ReactNode {
   );
 }
 
+const CELL_CONTENT_COLLAPSE_THRESHOLD = 3000;
+const CELL_CONTENT_PREVIEW_LENGTH = 100;
+
+function LongTextCell({ text }: { text: string }) {
+  const [is_expanded, set_is_expanded] = useState(false);
+
+  if (is_expanded) {
+    return (
+      <span className="inline-flex flex-col gap-1 min-w-0 max-w-full">
+        <span className="inline-block max-w-full break-words whitespace-pre-wrap text-sm text-white max-h-60 overflow-auto">
+          {text}
+        </span>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            set_is_expanded(false);
+          }}
+          className="self-start text-xs text-[#3ECF8E] hover:text-[#5ee0a8] transition-colors"
+        >
+          Show less
+        </button>
+      </span>
+    );
+  }
+
+  const preview = text.slice(0, CELL_CONTENT_PREVIEW_LENGTH);
+
+  return (
+    <span className="inline-flex flex-col gap-1 min-w-0 max-w-full">
+      <span className="inline-block max-w-full truncate text-sm text-white">
+        {preview}
+        <span className="text-[#8b8b8b]">…</span>
+      </span>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          set_is_expanded(true);
+        }}
+        className="self-start text-xs text-[#3ECF8E] hover:text-[#5ee0a8] transition-colors"
+      >
+        Show more
+      </button>
+    </span>
+  );
+}
+
 function JsonCellViewer({ value }: { value: unknown }): ReactNode {
   const [collapsed_paths, set_collapsed_paths] = useState<Set<string>>(new Set());
   const [is_fullscreen, set_is_fullscreen] = useState(false);
@@ -2958,6 +3006,9 @@ function TableView({
                                     <JsonCellViewer value={cell} />
                                   )
                                 : (() => {
+                                    if (cell_text.length > CELL_CONTENT_COLLAPSE_THRESHOLD) {
+                                      return <LongTextCell text={cell_text} />;
+                                    }
                                     const uuid_list = parse_uuids(cell);
                                     if (uuid_list) {
                                       return (
